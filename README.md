@@ -2,11 +2,15 @@
 
 Addon pro Blender 4.2 a novější. Z tratě nakreslené v mapě postaví mesh terénu podle výšek ČÚZK a položí na něj ortofoto. Panel je ve 3D okně pod záložkou **Terén**.
 
-## Instalace
+Celý projekt byl nakódován AI modelem Grok 4.7.
 
-Zazipujte tuto složku tak, aby v kořeni archivu byla `blender_lidartool` a v ní `__init__.py`. V Blenderu ji nainstalujte přes **Edit > Preferences > Add-ons > Install from Disk** a addon zapněte.
+## Instalace z release
 
-V panelu **Terén** jednou spusťte **Připravit prostředí**. Addon si do vlastního Pythonu doinstaluje knihovny z `requirements.txt`.
+1. Otevřete [Releases](https://github.com/DanoCZE/blender-lidartool/releases) a stáhněte ZIP přiložený k release. Je to archiv addonu, ne odkaz **Source code (zip)** na konci stránky. Ten má v kořeni jinou složku a Blender z něj addon nenačte.
+2. V Blenderu otevřete **Edit > Preferences > Add-ons**, vpravo nahoře rozbalte šipku a zvolte **Install from Disk**.
+3. Vyberte stažený ZIP. Nerozbalujte ho.
+4. Addon **Traťový terén** zapněte zaškrtnutím.
+5. Ve 3D okně otevřete postranní panel (**N**), záložku **Terén**, a jednou spusťte **Připravit prostředí**. Addon si do vlastního Pythonu doinstaluje knihovny z `requirements.txt`.
 
 ## Práce
 
