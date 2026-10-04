@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 set "ADDON=%cd%"
-set "ZIP=%~dp0..\blender_lidartool.zip"
+set "ZIP=%~dp0blender_lidartool.zip"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference = 'Stop';" ^
