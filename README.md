@@ -4,6 +4,16 @@ Addon pro Blender 4.2 a novější. Z tratě nakreslené v mapě postaví mesh t
 
 Celý projekt byl nakódován AI modelem Grok 4.7. Vydavatelem je DanoCZE a kód addonu je pod licencí MIT. Převzaté knihovny, data a služby mají vlastní podmínky. Přehled je níže, plné texty licencí v [LICENSE.md](LICENSE.md).
 
+## Náhled
+
+Editor tratě nad ortofotem. Oranžové tlačítko **Převést** pošle nakreslenou trať do Blenderu.
+
+![Editor tratě s ortofotem a zónami detailu](docs/track_editor.png)
+
+Panel **Terén** v postranní liště 3D okna.
+
+![Panel addonu Traťový terén ve Blenderu](docs/blender_addon.png)
+
 ## Instalace z release
 
 1. Otevřete [Releases](https://github.com/DanoCZE/blender-lidartool/releases) a stáhněte ZIP přiložený k release. Je to archiv addonu, ne odkaz **Source code (zip)** na konci stránky. Ten má v kořeni jinou složku a Blender z něj addon nenačte.
@@ -53,8 +63,8 @@ Na přání uživatele addon stáhne stránku z rally-maps.com a přečte z ní 
 
 Jsou v `editor/vendor` a znovu se sestaví v `editor` příkazem `npm install`.
 
-- Leaflet 1.9.4, BSD-2-Clause, Copyright (c) 2010–2023 Volodymyr Agafonkin, Copyright (c) 2010–2011 CloudMade. https://leafletjs.com
-- Turf.js 6.5.0, MIT, Copyright (c) 2019 Morgan Herlocker. https://turfjs.org
+- Leaflet 1.9.4, BSD-2-Clause, Copyright (c) 2010–2023 Volodymyr Agafonkin, Copyright (c) 2010–2011 CloudMade. [https://leafletjs.com](https://leafletjs.com)
+- Turf.js 6.5.0, MIT, Copyright (c) 2019 Morgan Herlocker. [https://turfjs.org](https://turfjs.org)
 - marked 15.0.12, MIT, Copyright (c) 2018+ MarkedJS, Copyright (c) 2011–2018 Christopher Jeffrey. Součástí je i licence formátu Markdown, Copyright © 2004 John Gruber.
 
 V balíku Turf.js je beze změny knihovna MarchingSquares.js 1.2.0, Copyright (c) 2015 Ronny Lorenz. Je pod GNU AGPL-3.0 s dodatečným svolením, že nezměněné vložení samo o sobě nepodřizuje zbytek programu licenci AGPL. Úpravy MarchingSquares.js je třeba zveřejnit.
