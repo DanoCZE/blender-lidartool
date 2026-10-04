@@ -2,7 +2,7 @@
 
 Addon pro Blender 4.2 a novější. Z tratě nakreslené v mapě postaví mesh terénu podle výšek ČÚZK a položí na něj ortofoto. Panel je ve 3D okně pod záložkou **Terén**.
 
-Celý projekt byl nakódován AI modelem Grok 4.7.
+Celý projekt byl nakódován AI modelem Grok 4.7. Vydavatelem je DanoCZE a kód addonu je pod licencí MIT. Převzaté knihovny, data a služby mají vlastní podmínky. Přehled je níže, plné texty licencí v [LICENSE.md](LICENSE.md).
 
 ## Instalace z release
 
@@ -21,6 +21,50 @@ Celý projekt byl nakódován AI modelem Grok 4.7.
 
 Podrobný popis mapového editoru je v `editor/help.md`.
 
-## Editor
+## Zdroje
 
-Mapa používá knihovny z `editor/vendor`. Znovu se sestaví v `editor` příkazem `npm install`.
+Data map a model se do archivu addonu nekopírují. Stahují se až při práci a platí licence jejich poskytovatelů.
+
+### ČÚZK
+
+Výšky a ortofoto pocházejí z otevřených dat Českého úřadu zeměměřického a katastrálního: ortofoto České republiky, digitální model reliéfu 5. generace (DMR 5G) a digitální model povrchu 1. generace (DMP 1G). Jsou pod licencí [Creative Commons BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.cs). Podmínky poskytování jsou na [Geoportálu ČÚZK](https://geoportal.cuzk.gov.cz/Dokumenty/Podminky.pdf).
+
+Služby, které addon volá:
+
+- ortofoto: `https://ags.cuzk.gov.cz/arcgis1/rest/services/ORTOFOTO_WM/MapServer`
+- DMR 5G: `https://ags.cuzk.gov.cz/arcgis2/rest/services/dmr5g/ImageServer`
+- DMP 1G: `https://ags.cuzk.gov.cz/arcgis2/rest/services/dmp1g/ImageServer`
+
+Kdo zveřejní trať z těchto dat, uvede zdroj a licenci. U textury zvětšené modelem Real-ESRGAN uvede i úpravu. Vhodné znění: „Výšky a ortofoto: © Český úřad zeměměřický a katastrální, licencováno pod CC BY 4.0. Ortofoto bylo zvětšeno modelem Real-ESRGAN.“
+
+### OpenStreetMap
+
+Podkladová mapa v editoru bere dlaždice z `https://tile.openstreetmap.org`. Data jsou © OpenStreetMap contributors a jsou dostupná pod [Open Database License](https://www.openstreetmap.org/copyright). Použití dlaždic se řídí [Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/).
+
+Vyhledání adresy posílá dotaz na Nominatim (`https://nominatim.openstreetmap.org`). Platí [Nominatim Usage Policy](https://operations.osmfoundation.org/policies/nominatim/).
+
+Přichycení tratě na silnici volá ukázkové servery OSRM, které provozuje FOSSGIS: `https://routing.openstreetmap.de` a záložní `https://router.project-osrm.org`. Jde o ukázkový provoz, ne o službu pro hromadné použití. Trasa se označí jako výstup OSRM nad daty © OpenStreetMap contributors. Podmínky jsou na [routing.openstreetmap.de](https://routing.openstreetmap.de/about.html).
+
+### Rally-Maps
+
+Na přání uživatele addon stáhne stránku z rally-maps.com a přečte z ní souřadnice tratě. Trať na tom webu patří jeho provozovateli a platí jeho podmínky. Souřadnice se do archivu addonu neukládají.
+
+### Knihovny v editoru
+
+Jsou v `editor/vendor` a znovu se sestaví v `editor` příkazem `npm install`.
+
+- Leaflet 1.9.4, BSD-2-Clause, Copyright (c) 2010–2023 Volodymyr Agafonkin, Copyright (c) 2010–2011 CloudMade. https://leafletjs.com
+- Turf.js 6.5.0, MIT, Copyright (c) 2019 Morgan Herlocker. https://turfjs.org
+- marked 15.0.12, MIT, Copyright (c) 2018+ MarkedJS, Copyright (c) 2011–2018 Christopher Jeffrey. Součástí je i licence formátu Markdown, Copyright © 2004 John Gruber.
+
+V balíku Turf.js je beze změny knihovna MarchingSquares.js 1.2.0, Copyright (c) 2015 Ronny Lorenz. Je pod GNU AGPL-3.0 s dodatečným svolením, že nezměněné vložení samo o sobě nepodřizuje zbytek programu licenci AGPL. Úpravy MarchingSquares.js je třeba zveřejnit.
+
+### Real-ESRGAN a PyTorch
+
+Zvětšení textury používá architekturu a váhy Real-ESRGAN x4plus, Copyright (c) 2021 Xintao Wang, licence BSD-3-Clause. Váhy `RealESRGAN_x4plus.pth` se stahují z vydání [xinntao/Real-ESRGAN v0.1.0](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth) a v archivu addonu nejsou. Soubor `engine/rrdb.py` je implementace této sítě.
+
+PyTorch s podporou CUDA a související knihovny NVIDIA se instalují zvlášť do složky zvolené v panelu. Platí jejich vlastní licence a do tohoto repozitáře se nekopírují.
+
+### Knihovny Pythonu
+
+`requirements.txt` uvádí rasterio, pyproj, numpy, shapely, pillow, gpxpy, requests, trimesh, scipy, laspy a truststore. Do archivu se nebalí. Po příkazu **Připravit prostředí** je nainstaluje pip a u každého balíčku zůstane jeho vlastní licence.
