@@ -1,0 +1,12 @@
+{
+  "name": "blender-lidartool-editor",
+  "private": true,
+  "scripts": {
+    "postinstall": "node vendor.js"
+  },
+  "dependencies": {
+    "@turf/turf": "6.5.0",
+    "leaflet": "1.9.4",
+    "marked": "15.0.12"
+  }
+}

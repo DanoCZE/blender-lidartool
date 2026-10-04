@@ -1,0 +1,11 @@
+rasterio>=1.4
+pyproj>=3.6
+numpy>=2.0
+shapely>=2.0
+pillow>=10.0
+gpxpy>=1.6
+requests>=2.32
+trimesh>=4.0
+scipy>=1.13
+laspy>=2.5
+truststore>=0.10

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Editor tratě</title>
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="css/editor.css">
+</head>
+<body>
+  <div id="bar">
+    <div class="bar-group">
+      <span class="bar-brand">Trať</span>
+      <div class="bar-cluster">
+        <button type="button" id="mode-track" class="btn icon active" title="Edit tratě. Klik označí bod. Shift a klik z něj udělá křižovatku, bez označeného bodu přidá bod na konec.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l5-7 4 4 7-9"/></svg>
+        </button>
+        <button type="button" id="mode-reference" class="btn icon" title="Edit předlohy. G posune, R otočí, S mění měřítko. Levé tlačítko potvrdí, Esc zruší.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1"/><path d="M4 16l4-4 3 3 2-2 5 4"/></svg>
+        </button>
+      </div>
+      <div class="bar-cluster">
+        <button type="button" id="basemap-ortho" class="btn icon active" title="Podklad: ortofoto ČÚZK.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="1"/><circle cx="8" cy="10" r="1.4"/><path d="M3 16l5-4 4 3 3-2 6 4"/></svg>
+        </button>
+        <button type="button" id="basemap-osm" class="btn icon" title="Podklad: mapa OpenStreetMap.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3l6 2v16l-6-2V3z"/><path d="M9 3L4 5v16l5-2M15 5l5-2v16l-5 2"/></svg>
+        </button>
+      </div>
+      <div id="brush-menu">
+        <div class="brush-wrap">
+          <button type="button" id="brush" class="btn icon" title="Štětec: zóna 1 (Tab). Najetím nastavíte cíl a poloměr. Tažením rozšíříte plochu, Ctrl maže, Alt a kolečko mění velikost.">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"/></svg>
+          </button>
+          <span id="brush-badge">24</span>
+        </div>
+        <div id="brush-popover">
+          <label>Cíl
+            <select id="brush-target" title="Kam štětec maluje.">
+              <option value="1">Zóna 1</option>
+              <option value="2">Zóna 2</option>
+              <option value="3">Zóna 3</option>
+              <option value="4">Zóna 4</option>
+              <option value="corridor">Koridor silnice</option>
+            </select>
+          </label>
+          <input id="brush-radius" type="range" min="2" max="200" step="1" value="24" title="Poloměr štětce v metrech.">
+          <button type="button" id="brush-clear" class="btn" title="Smaže namalovanou plochu zvoleného cíle.">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16l8-8 4 4-8 8H4v-4z"/><path d="M13 7l4 4"/></svg>
+            Smazat plochu
+          </button>
+        </div>
+      </div>
+      <form id="search">
+        <label class="search-field">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></svg>
+          <input id="query" type="search" placeholder="Hledat adresu, obec nebo ulici" autocomplete="off">
+        </label>
+        <ul id="results" class="hidden"></ul>
+      </form>
+    </div>
+    <span id="sep-track" class="bar-sep"></span>
+    <div id="bar-track" class="bar-group">
+      <div class="bar-cluster">
+        <button type="button" id="clear" class="btn icon" title="Smazat celou trať.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M7 7l1 13h8l1-13"/></svg>
+        </button>
+        <button type="button" id="delete-point" class="btn icon" title="Smazat vybraný bod (Delete)." disabled>
+          <svg class="filled" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6l1 2h4v2H4V5h4l1-2zm1 6h2v9h-2V9zm4 0h2v9h-2V9zM7 9h2v9H7V9z"/></svg>
+        </button>
+        <button type="button" id="simplify" class="btn icon" title="Zjednodušit trať. Rovné úseky se spojí a zbytečných bodů ubude.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l5-8 4 4 7-9"/><path d="M15 19h6"/></svg>
+        </button>
+      </div>
+      <div id="snap-menu">
+        <button type="button" id="snap" class="btn icon" title="Připnout nakreslenou hlavní trať na silnice. Doplní body podle tvaru cesty mezi vašimi body, neuzavírá okruh. Najetím zvolíte profil.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18c3-7 5-9 8-9s5 2 8 9"/><circle cx="12" cy="8" r="2"/></svg>
+        </button>
+        <div id="snap-popover">
+          <label>Profil
+            <select id="profile" title="Profil přichycení na silnice.">
+              <option value="driving">auto</option>
+              <option value="cycling">kolo</option>
+              <option value="walking">chůze</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    </div>
+    <span class="bar-sep"></span>
+    <div class="bar-group bar-end">
+      <div class="bar-cluster">
+        <button type="button" id="undo" class="btn icon" title="Zpět (Ctrl+Z).">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L5 10l4-4"/><path d="M5 10h8a5 5 0 010 10h-2"/></svg>
+        </button>
+        <button type="button" id="redo" class="btn icon" title="Znovu (Ctrl+Y).">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14l4-4-4-4"/><path d="M19 10h-8a5 5 0 000 10h2"/></svg>
+        </button>
+      </div>
+      <button type="button" id="help" class="btn icon" title="Nápověda">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M9.5 9.5a2.5 2.5 0 113.2 2.4c-.7.3-1.2.9-1.2 1.6V14"/><path d="M12 17h.01"/></svg>
+      </button>
+      <button type="button" id="apply" class="btn primary" title="Přenést trať, zóny a předlohu do Blenderu a zavřít editor. Snímek se vloží až tlačítkem Vložit referenci.">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5L20 7"/></svg>
+        Přenést
+      </button>
+    </div>
+  </div>
+  <aside id="zones-panel">
+    <div id="sidebar-head">
+      <span id="sidebar-title">Zóny</span>
+      <button type="button" id="sidebar-toggle" class="btn icon" title="Sbalit panel" aria-expanded="true" aria-controls="sidebar-body">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+    <div id="sidebar-body">
+      <div id="panel-zones" class="panel-body">
+        <label>Hranice terénu (m)<input id="terrain-buffer" type="number" min="50" step="50" value="2000"></label>
+        <label><span class="zone-title" style="margin:0"><i class="swatch" style="background:#d7a441"></i>Koridor silnice (m)</span><input id="road-corridor" type="number" min="5" step="1" value="25" title="Zlatý pás podél tratě. Hodnota je vzdálenost od osy na každou stranu."></label>
+        <div id="zone-rows"></div>
+        <p class="hint">Zlatý pás je koridor silnice. Prázdný poloměr je zbytek terénu. Poloměry rostou od silnice ven.</p>
+      </div>
+      <div id="panel-reference" class="panel-body hidden">
+        <div id="reference-drop" class="dropzone" title="PNG, JPEG nebo WEBP.">
+          <input id="reference-file" class="hidden" type="file" accept="image/png,image/jpeg,image/webp">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V6"/><path d="M8 10l4-4 4 4"/><path d="M5 18h14"/></svg>
+          <strong>Přetáhněte snímek</strong>
+          <span id="reference-drop-name">nebo klikněte a vyberte PNG, JPEG či WEBP</span>
+        </div>
+        <label>Natočení (°)<input id="reference-rotation" type="range" min="-180" max="180" step="1" value="0"></label>
+        <label>Měřítko<input id="reference-scale" type="range" min="0.05" max="8" step="0.05" value="1"></label>
+        <label>Průhlednost<input id="reference-opacity" type="range" min="0.05" max="1" step="0.05" value="0.6"></label>
+        <button type="button" id="reference-clear" class="btn">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1"/><path d="M5 19L19 5"/></svg>
+          Sundat předlohu
+        </button>
+      </div>
+    </div>
+  </aside>
+  <div id="map"></div>
+  <div id="debug-dock">
+    <span class="debug-wrap">
+      <button type="button" id="debug-toggle" class="btn icon" title="Konzole kroků. Ukáže, co právě běží a jakou chybou to skončilo.">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 9h.01M15 9h.01"/><path d="M8 13a4 4 0 008 0"/><rect x="7" y="6" width="10" height="12" rx="5"/><path d="M12 6V3M5 10H3M21 10h-2M6 15l-2 2M18 15l2 2"/></svg>
+      </button>
+      <i id="debug-badge" class="hidden"></i>
+    </span>
+    <div id="status">Shift a klik přidá bod. Samotný klik posune poslední bod.</div>
+    <div id="debug-console" class="hidden">
+      <div id="debug-lines" class="debug-empty">Zatím žádný krok.</div>
+    </div>
+  </div>
+  <div id="help-modal" aria-hidden="true">
+    <div id="help-panel" role="dialog" aria-modal="true" aria-labelledby="help-title">
+      <div id="help-head">
+        <h2 id="help-title">Nápověda</h2>
+        <button type="button" id="help-close" class="btn icon" title="Zavřít nápovědu.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div id="help-body"></div>
+    </div>
+  </div>
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="vendor/turf.min.js"></script>
+  <script src="vendor/marked.min.js"></script>
+  <script src="js/core.js"></script>
+  <script src="js/history.js"></script>
+  <script src="js/zones.js"></script>
+  <script src="js/track-draw.js"></script>
+  <script src="js/help.js"></script>
+  <script src="js/track-api.js"></script>
+  <script src="js/search.js"></script>
+  <script src="js/reference.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
