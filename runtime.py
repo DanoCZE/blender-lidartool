@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import locale
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -46,6 +48,7 @@ TORCH_INDEX = "https://download.pytorch.org/whl/cu124"
 
 
 WEIGHTS_NAME = "RealESRGAN_x4plus.pth"
+LEGACY_WEIGHTS_NAME = "4xSPANkendata.pth"
 TORCH_DIR_NAME = "lidar_torch"
 AI_MARKER = ".lidar_ai"
 
@@ -217,6 +220,85 @@ def _no_window() -> int:
 
 
 _CURRENT_PROCESS: subprocess.Popen | None = None
+_INSTALL_STATUS = ""
+
+
+def install_status() -> str:
+    return _INSTALL_STATUS
+
+
+def _set_install_status(text: str) -> None:
+    global _INSTALL_STATUS
+    _INSTALL_STATUS = text
+
+
+def _fmt_size(count: int) -> str:
+    if count >= 1_000_000_000:
+        return f"{count / 1_000_000_000:.1f} GB".replace(".", ",")
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.0f} MB"
+    if count >= 1_000:
+        return f"{count / 1_000:.0f} kB"
+    return f"{count} B"
+
+
+def _fmt_eta(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds >= 5400:
+        return f"{seconds / 3600:.1f} h".replace(".", ",")
+    if seconds >= 90:
+        return f"{max(1, round(seconds / 60))} min"
+    return f"{max(1, seconds)} s"
+
+
+class _PipWatch:
+    """Z průběhu pipu složí krátký text: balíček, procenta a odhad času."""
+
+    def __init__(self) -> None:
+        self.package = ""
+        self.t0 = 0.0
+        self.b0 = 0
+
+    def feed(self, line: str) -> str | None:
+        if line.startswith("Collecting "):
+            self.package = line.split()[1]
+            self.t0 = 0.0
+            return f"hledám {self.package}"
+        if line.startswith("Downloading "):
+            body = line[len("Downloading ") :]
+            size = ""
+            found = re.search(r"\(([^)]+)\)\s*$", body)
+            if found:
+                size = found.group(1)
+                body = body[: found.start()].strip()
+            self.package = body.split("-", 1)[0]
+            self.t0 = 0.0
+            return f"stahuji {self.package} {size}".strip()
+        if line.startswith("Installing collected"):
+            return "rozbaluji stažené balíčky"
+        if line.startswith("Successfully installed"):
+            return "nainstalováno"
+        if line.startswith("Requirement already satisfied"):
+            return "už je nainstalované"
+        found = re.match(r"Progress (\d+) of (\d+)$", line)
+        if not found:
+            return None
+        current = int(found.group(1))
+        total = int(found.group(2))
+        if total <= 0:
+            return None
+        now = time.monotonic()
+        if self.t0 <= 0:
+            self.t0 = now
+            self.b0 = current
+        name = self.package or "balíček"
+        percent = current * 100 // total
+        text = f"{name} · {percent} % · {_fmt_size(current)}/{_fmt_size(total)}"
+        elapsed = now - self.t0
+        done = current - self.b0
+        if elapsed >= 1 and done > 0 and current < total:
+            text += f" · zbývá {_fmt_eta((total - current) * elapsed / done)}"
+        return text
 
 
 def watch_process(process: subprocess.Popen | None) -> None:
@@ -240,23 +322,80 @@ def cancel_current() -> None:
         process.kill()
 
 
-def _run(command: list[str], log: Path) -> None:
+def _run(command: list[str], log: Path, on_line=None) -> None:
     global _CURRENT_PROCESS
     with log.open("ab") as handle:
+        env = worker_env()
+        env["PYTHONUNBUFFERED"] = "1"
         process = subprocess.Popen(
             command,
-            stdout=handle,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env=worker_env(),
+            env=env,
             creationflags=_no_window(),
         )
         _CURRENT_PROCESS = process
+        pending = b""
+        stream = process.stdout
+        assert stream is not None
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            handle.write(chunk)
+            handle.flush()
+            pending += chunk
+            parts = re.split(br"[\r\n]+", pending)
+            pending = parts.pop() if parts else b""
+            if on_line is None:
+                continue
+            for part in parts:
+                text = part.decode("utf-8", errors="replace").strip()
+                if text:
+                    on_line(text)
+        if pending and on_line is not None:
+            text = pending.decode("utf-8", errors="replace").strip()
+            if text:
+                on_line(text)
         return_code = process.wait()
         if _CURRENT_PROCESS is process:
             _CURRENT_PROCESS = None
     if return_code != 0:
         tail = log.read_text(encoding="utf-8", errors="replace")[-2000:]
         raise RuntimeError(tail.strip() or "Příkaz selhal.")
+
+
+def _note_pip(prefix: str):
+    watch = _PipWatch()
+
+    def on_line(line: str) -> None:
+        extra = watch.feed(line)
+        if extra:
+            _set_install_status(f"{prefix} · {extra}")
+
+    return on_line
+
+
+def _download(url: str, dest: Path, title: str) -> None:
+    started = time.monotonic()
+    last = 0.0
+
+    def hook(block: int, block_size: int, total: int) -> None:
+        nonlocal last
+        now = time.monotonic()
+        if block > 1 and now - last < 0.3:
+            return
+        last = now
+        got = block * block_size
+        if total and total > 0:
+            got = min(got, total)
+            elapsed = max(now - started, 0.001)
+            eta = f" · zbývá {_fmt_eta((total - got) * elapsed / got)}" if got > 50_000 and got < total else ""
+            _set_install_status(f"{title} · {got * 100 // total} % · {_fmt_size(got)}/{_fmt_size(total)}{eta}")
+            return
+        _set_install_status(f"{title} · {_fmt_size(got)}")
+
+    urllib.request.urlretrieve(url, dest, reporthook=hook)
 
 
 def _ensure_pip(python: Path, get_pip: Path, log: Path) -> None:
@@ -323,9 +462,10 @@ def relink_installed_torch(venv: Path, root: Path) -> None:
 
 
 def _remove_payload_dir(directory: Path) -> None:
-    weights = directory / WEIGHTS_NAME
-    if weights.is_file() or weights.is_symlink():
-        weights.unlink()
+    for name in (WEIGHTS_NAME, LEGACY_WEIGHTS_NAME):
+        weights = directory / name
+        if weights.is_file() or weights.is_symlink():
+            weights.unlink()
     marker = directory / AI_MARKER
     if marker.is_file() or marker.is_symlink():
         marker.unlink()
@@ -409,38 +549,57 @@ def install_ai(
     target = directory / TORCH_DIR_NAME
     previous = _clean_dir(record.read_text(encoding="utf-8")) if record.is_file() else None
     link = torch_link_path(venv)
-    if link.is_file() or link.is_symlink():
-        link.unlink()
-    if target.is_symlink():
-        target.unlink()
-    elif target.exists():
-        shutil.rmtree(target)
-    _run([str(python), "-m", "pip", "install", "--upgrade", "pip"], log)
-    _run(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            "--no-cache-dir",
-            "--target",
-            str(target),
-            "torch",
-            "--index-url",
-            TORCH_INDEX,
-        ],
-        log,
-    )
-    if not (target / "torch" / "__init__.py").is_file():
-        raise RuntimeError("PyTorch se do zvolené složky nenainstaloval.")
-    names = _venv_ai_packages(python)
-    if names:
-        _run([str(python), "-m", "pip", "uninstall", "-y", *names], log)
-    _write_torch_link(venv, target)
+    if _torch_package_ready(directory):
+        _set_install_status("1/4 · PyTorch už je ve složce")
+        if not link.is_file():
+            _write_torch_link(venv, target)
+    else:
+        if link.is_file() or link.is_symlink():
+            link.unlink()
+        if target.is_symlink():
+            target.unlink()
+        elif target.exists():
+            shutil.rmtree(target)
+        _set_install_status("1/4 · aktualizuji pip")
+        _run([str(python), "-m", "pip", "install", "--upgrade", "pip"], log, _note_pip("1/4 · pip"))
+        _set_install_status("2/4 · stahuji PyTorch pro CUDA, to je největší část")
+        _run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--no-cache-dir",
+                "--progress-bar",
+                "raw",
+                "--target",
+                str(target),
+                "torch",
+                "--index-url",
+                TORCH_INDEX,
+            ],
+            log,
+            _note_pip("2/4 · PyTorch"),
+        )
+        if not (target / "torch" / "__init__.py").is_file():
+            raise RuntimeError("PyTorch se do zvolené složky nenainstaloval.")
+        names = _venv_ai_packages(python)
+        if names:
+            _set_install_status("2/4 · odstraňuji starší PyTorch z prostředí")
+            _run([str(python), "-m", "pip", "uninstall", "-y", *names], log)
+        _set_install_status("3/4 · propojuji PyTorch")
+        _write_torch_link(venv, target)
     if not weights.is_file() or weights.stat().st_size < 1_000_000:
-        urllib.request.urlretrieve(WEIGHTS_URL, weights)
+        _download(WEIGHTS_URL, weights, "3/4 · váhy Real-ESRGAN")
+    else:
+        _set_install_status("3/4 · váhy Real-ESRGAN už jsou na disku")
+    legacy = directory / LEGACY_WEIGHTS_NAME
+    if legacy.is_file() and legacy.resolve() != weights.resolve():
+        legacy.unlink()
+    _set_install_status("4/4 · kontroluji, že grafika vidí CUDA")
     _probe_torch(python)
+    _set_install_status("4/4 · uklízím starší instalaci")
     stale = list(cleanup_dirs or [])
     if previous is not None:
         stale.append(previous)

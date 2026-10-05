@@ -106,6 +106,46 @@ def _output_dir_from_texture(path: Path) -> Path | None:
     return None
 
 
+def _output_texture_images(output: Path):
+    folder = (output / "textures").resolve()
+    images = []
+    for image in bpy.data.images:
+        raw = image.filepath
+        if not raw:
+            continue
+        path = Path(bpy.path.abspath(raw))
+        try:
+            if path.resolve().is_relative_to(folder):
+                images.append(image)
+        except (OSError, ValueError):
+            continue
+    return images
+
+
+def _release_output_images(output: Path) -> list[tuple[str, str]]:
+    """Blender jinak drží JPEG namapovaný a Windows přepis odmítne."""
+    held = []
+    for image in _output_texture_images(output):
+        held.append((image.name, image.filepath))
+        if hasattr(image, "gl_free"):
+            image.gl_free()
+        image.buffers_free()
+        image.filepath = ""
+    return held
+
+
+def _restore_output_images(held: list[tuple[str, str]]) -> None:
+    for name, filepath in held:
+        image = bpy.data.images.get(name)
+        if image is None or not filepath or image.filepath:
+            continue
+        image.filepath = filepath
+        try:
+            image.reload()
+        except (RuntimeError, OSError):
+            pass
+
+
 def _terrain_output(context) -> Path | None:
     current = _cache(context) / "OUTPUT"
     if (current / "mesh.npz").is_file():
@@ -357,6 +397,7 @@ class _Job:
             return {"PASS_THROUGH"}
         if getattr(self, "_cancel_requested", False):
             self.cancel(context)
+            self._restore_held()
             context.scene.lidar_status = "Zrušeno."
             _append_log(context.scene, "Zrušeno")
             _redraw(context)
@@ -376,6 +417,7 @@ class _Job:
         if status:
             _sync_log(context.scene, status, self)
         if self._proc.returncode != 0:
+            self._restore_held()
             message = (status or {}).get("error") or _log_tail(self._log_path) or "Úloha selhala."
             context.scene.lidar_status = message
             if not (context.scene.lidar_log or "").rstrip().endswith(message):
@@ -386,6 +428,7 @@ class _Job:
         try:
             self._apply(context)
         except Exception as exc:
+            self._restore_held()
             context.scene.lidar_status = str(exc)
             self.report({"ERROR"}, str(exc))
             _redraw(context)
@@ -394,6 +437,12 @@ class _Job:
             context.scene.lidar_status = status["message"]
         _redraw(context)
         return {"FINISHED"}
+
+    def _restore_held(self) -> None:
+        held = getattr(self, "_held_images", None) or []
+        self._held_images = []
+        if held:
+            _restore_output_images(held)
 
     def cancel(self, context):
         global _BUSY
@@ -755,7 +804,12 @@ class LIDAR_OT_upscale(_Job, bpy.types.Operator):
             return {"CANCELLED"}
         request = _write_request(context)
         cache = _cache(context)
-        return self._begin(context, ["--status", str(cache / "TEMP" / "status.json"), "upscale", "--request", str(request)])
+        output = _terrain_output(context) or (cache / "OUTPUT")
+        self._held_images = _release_output_images(output)
+        outcome = self._begin(context, ["--status", str(cache / "TEMP" / "status.json"), "upscale", "--request", str(request)])
+        if outcome == {"CANCELLED"}:
+            self._restore_held()
+        return outcome
 
     def _apply(self, context):
         scene.reload_ortho(context, self._output)
@@ -780,7 +834,7 @@ class LIDAR_OT_driveline(_Job, bpy.types.Operator):
 class LIDAR_OT_install_ai(bpy.types.Operator):
     bl_idname = "lidar.install_ai"
     bl_label = "Nainstalovat AI model"
-    bl_description = "Do zvolené složky nainstaluje CUDA PyTorch a stáhne Real-ESRGAN x4plus"
+    bl_description = "Do zvolené složky nainstaluje CUDA PyTorch a stáhne model Real-ESRGAN"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
@@ -809,7 +863,7 @@ class LIDAR_OT_install_ai(bpy.types.Operator):
 
         self._thread = threading.Thread(target=work, daemon=True)
         self._thread.start()
-        context.scene.lidar_status = "Instaluji PyTorch a Real-ESRGAN do zvolené složky. Může to trvat dlouho."
+        context.scene.lidar_status = "1/4 · připravuji instalaci AI modelu"
         window = context.window or context.window_manager.windows[0]
         self._timer = context.window_manager.event_timer_add(0.5, window=window)
         context.window_manager.modal_handler_add(self)
@@ -823,6 +877,9 @@ class LIDAR_OT_install_ai(bpy.types.Operator):
             runtime.cancel_current()
             self._error = "Zrušeno."
         if self._thread.is_alive() and not getattr(self, "_cancel_requested", False):
+            detail = runtime.install_status()
+            if detail:
+                context.scene.lidar_status = detail
             _redraw(context)
             return {"RUNNING_MODAL"}
         context.window_manager.event_timer_remove(self._timer)

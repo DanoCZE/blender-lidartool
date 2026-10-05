@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -211,7 +212,7 @@ def _upscale_x4_retry(
     passes: int = 1,
     scale: int = 4,
 ):
-    size = max(128, int(tile))
+    size = max(128, min(512, int(tile)))
     last_error = None
     while size >= 128:
         try:
@@ -228,9 +229,9 @@ def _upscale_x4_retry(
             )
         except GpuOutOfMemory as exc:
             last_error = exc
-            size //= 2
+            size = 384 if size > 384 else size // 2
             gc.collect()
-            if reporter is not None:
+            if reporter is not None and size >= 128:
                 reporter.emit(0.0, f"málo VRAM, zkouším dlaždici {size} px", force=True, event=f"málo VRAM, zkouším dlaždici {size} px")
     raise RuntimeError("Grafika nemá dost paměti ani pro dlaždici 128 px. Zmenšete ji v panelu a zkuste znovu.") from last_error
 
@@ -302,6 +303,7 @@ def _upscale_x4_tiled(
         factor,
         reporter,
     )
+    _match_source_tone(image, output, factor, reporter)
     if scratch:
         output.flush()
     return output, scratch
@@ -353,7 +355,7 @@ def _repair_soft_tiles(image, output, ys, xs, inner, _pad, tile, upscale_x4, shr
         )
     if not jobs:
         return 0
-    span = max(128, min(512, int(tile)))
+    span = max(128, min(1024, int(tile)))
     piece_limit = max(32, span - 256)
     allow_gpu = True
     ai_fixed = 0
@@ -577,6 +579,62 @@ def _sharpness(image: np.ndarray) -> float:
     return float(vertical.mean() + horizontal.mean())
 
 
+def _match_source_tone(source: np.ndarray, output, factor: int, reporter=None) -> None:
+    """Jas, expozice a kontrast srovná s originálem.
+
+    Průměr drží jas a expozici, směrodatná odchylka kontrast. Počítá se až po
+    zmenšení na velikost originálu, takže ostrost nových pixelů zůstane.
+    """
+    src_mean, src_std = _channel_stats(source)
+    out_mean, out_std = _downscaled_stats(output, factor, source.shape[0], source.shape[1])
+    scale = np.ones(3, dtype=np.float32)
+    usable = out_std > 0.5
+    scale[usable] = (src_std[usable] / out_std[usable]).astype(np.float32)
+    shift = (src_mean - out_mean * scale).astype(np.float32)
+    if np.allclose(scale, 1.0, atol=0.004) and np.allclose(shift, 0.0, atol=0.2):
+        return
+    _apply_tone(output, scale, shift)
+    if reporter is not None:
+        reporter.emit(
+            1.0,
+            "jas a kontrast srovnány s originálem",
+            force=True,
+            event="jas a kontrast srovnány s originálem",
+        )
+
+
+def _channel_stats(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    values = np.asarray(image, dtype=np.float64)
+    return values.mean(axis=(0, 1)), values.std(axis=(0, 1))
+
+
+def _downscaled_stats(image, factor: int, height: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+    factor = max(1, int(factor))
+    total = np.zeros(3, dtype=np.float64)
+    squares = np.zeros(3, dtype=np.float64)
+    count = 0
+    step = 64
+    for y in range(0, height, step):
+        rows = min(step, height - y)
+        slab = np.asarray(image[y * factor : (y + rows) * factor, : width * factor], dtype=np.float64)
+        block = slab.reshape(rows, factor, width, factor, 3).mean(axis=(1, 3))
+        total += block.sum(axis=(0, 1))
+        squares += np.square(block).sum(axis=(0, 1))
+        count += rows * width
+    mean = total / max(1, count)
+    variance = np.maximum(squares / max(1, count) - np.square(mean), 0.0)
+    return mean, np.sqrt(variance)
+
+
+def _apply_tone(output, scale: np.ndarray, shift: np.ndarray) -> None:
+    rows = 32
+    for y in range(0, output.shape[0], rows):
+        slab = np.asarray(output[y : y + rows], dtype=np.float32)
+        slab *= scale
+        slab += shift
+        output[y : y + rows] = np.clip(np.rint(slab), 0, 255).astype(np.uint8)
+
+
 def _box_down(image: np.ndarray, factor: int) -> np.ndarray:
     factor = max(1, int(factor))
     height = int(image.shape[0]) // factor * factor
@@ -737,11 +795,24 @@ def _save_rgb(array: np.ndarray, dest: Path, lossless: bool) -> None:
         array = np.ascontiguousarray(array)
     image = Image.fromarray(array, "RGB")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if lossless:
-        image.save(dest, format="PNG", optimize=True, compress_level=6)
-        return
-    huge = int(array.shape[0]) * int(array.shape[1]) > 8_000_000
-    image.save(dest, format="JPEG", quality=95, subsampling=0, optimize=not huge)
+    temporary = dest.with_name(dest.name + ".writing")
+    try:
+        with temporary.open("wb") as handle:
+            if lossless:
+                image.save(handle, format="PNG", optimize=True, compress_level=6)
+            else:
+                huge = int(array.shape[0]) * int(array.shape[1]) > 8_000_000
+                image.save(handle, format="JPEG", quality=95, subsampling=0, optimize=not huge)
+        os.replace(temporary, dest)
+    except OSError as exc:
+        if exc.errno == 22:
+            raise OSError(
+                f"Soubor {dest.name} je otevřený v Blenderu a Windows ho nedovolí přepsat. Zavři náhled textury a spusť upscale znovu."
+            ) from exc
+        raise
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
 
 
 def _origins(length: int, tile: int) -> list[int]:

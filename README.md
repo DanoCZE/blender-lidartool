@@ -45,7 +45,7 @@ Služby, které addon volá:
 - DMR 5G: `https://ags.cuzk.gov.cz/arcgis2/rest/services/dmr5g/ImageServer`
 - DMP 1G: `https://ags.cuzk.gov.cz/arcgis2/rest/services/dmp1g/ImageServer`
 
-Kdo zveřejní trať z těchto dat, uvede zdroj a licenci. U textury zvětšené modelem Real-ESRGAN uvede i úpravu. Vhodné znění: „Výšky a ortofoto: © Český úřad zeměměřický a katastrální, licencováno pod CC BY 4.0. Ortofoto bylo zvětšeno modelem Real-ESRGAN.“
+Kdo zveřejní trať z těchto dat, uvede zdroj a licenci. U textury zvětšené modelem Real-ESRGAN uvede i úpravu. Vhodné znění: „Výšky a ortofoto: © Český úřad zeměměřický a katastrální, licencováno pod CC BY 4.0. Ortofoto bylo zvětšeno modelem Real-ESRGAN (BSD-3-Clause).“
 
 ### OpenStreetMap
 
@@ -71,7 +71,7 @@ V balíku Turf.js je beze změny knihovna MarchingSquares.js 1.2.0, Copyright (c
 
 ### Real-ESRGAN a PyTorch
 
-Zvětšení textury používá architekturu a váhy Real-ESRGAN x4plus, Copyright (c) 2021 Xintao Wang, licence BSD-3-Clause. Váhy `RealESRGAN_x4plus.pth` se stahují z vydání [xinntao/Real-ESRGAN v0.1.0](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth) a v archivu addonu nejsou. Soubor `engine/rrdb.py` je implementace této sítě.
+Zvětšení textury používá síť Real-ESRGAN x4plus. Váhy `RealESRGAN_x4plus.pth` se stahují z [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth), licence BSD-3-Clause, a v archivu addonu nejsou. Soubor `engine/rrdb.py` je implementace sítě RRDBNet z tohoto projektu.
 
 PyTorch s podporou CUDA a související knihovny NVIDIA se instalují zvlášť do složky zvolené v panelu. Platí jejich vlastní licence a do tohoto repozitáře se nekopírují.
 

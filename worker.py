@@ -282,6 +282,8 @@ def cmd_upscale(args) -> str:
         if scale not in UPSCALE_SCALES:
             raise ValueError("Násobek upscale musí být 1, 2, 4, 8 nebo 16.")
     tile = int(project.get("upscale_tile") or 384)
+    if tile > 512:
+        tile = 384
     from_original = str(project.get("upscale_from") or "original") != "upscaled"
     weights = Path(project.get("weights") or "")
     try:
