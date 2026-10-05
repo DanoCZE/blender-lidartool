@@ -208,18 +208,7 @@ def _upscale_x4_tiled(
         bottom = min(height, top + inner)
         for left in xs:
             right = min(width, left + inner)
-            crop = _context_crop(image, top, bottom, left, right, pad)
-            scaled = np.asarray(upscale_x4(crop))
-            expected = (crop.shape[0] * 4, crop.shape[1] * 4, 3)
-            if scaled.shape != expected:
-                raise ValueError("Model nevrátil čtyřnásobek dlaždice.")
-            if pad:
-                margin = pad * 4
-                scaled = scaled[margin:-margin, margin:-margin]
-            if shrink:
-                scaled = downsample_half(scaled)
-            elif scaled.dtype != np.uint8:
-                scaled = np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
+            scaled = _scale_region(image, top, bottom, left, right, pad, upscale_x4, shrink)
             y0 = top * factor
             x0 = left * factor
             output[y0 : y0 + scaled.shape[0], x0 : x0 + scaled.shape[1]] = scaled
@@ -229,13 +218,152 @@ def _upscale_x4_tiled(
                 eta = _eta_text(started, done, total)
                 extras = f" · {eta}" if eta else ""
                 reporter.emit(
-                    done / total,
+                    0.9 * done / total,
                     f"průchod {pass_index + 1}/{passes} {goal} · {_px(width, height)} → {_px(out_w, out_h)} · dlaždice {done}/{total}{extras}",
                     force=done == total,
                 )
+    _repair_soft_tiles(
+        image,
+        output,
+        ys,
+        xs,
+        inner,
+        pad,
+        tile,
+        upscale_x4,
+        shrink,
+        factor,
+        reporter,
+    )
     if scratch:
         output.flush()
     return output, scratch
+
+
+def _scale_region(image, top, bottom, left, right, pad, upscale_x4, shrink):
+    crop = _context_crop(image, top, bottom, left, right, pad)
+    scaled = np.asarray(upscale_x4(crop))
+    expected = (crop.shape[0] * 4, crop.shape[1] * 4, 3)
+    if scaled.shape != expected:
+        raise ValueError("Model nevrátil čtyřnásobek dlaždice.")
+    if pad:
+        margin = pad * 4
+        scaled = scaled[margin:-margin, margin:-margin]
+    if shrink:
+        scaled = downsample_half(scaled)
+    elif scaled.dtype != np.uint8:
+        scaled = np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
+    return scaled
+
+
+def _repair_context(tile: int, pad: int, inner: int) -> int:
+    """Větší okolí pro druhý průchod. Vejde se do 512 px, což je strop dlaždice."""
+    room = 512 - (inner + 2 * pad)
+    if room < 32:
+        return pad
+    return pad + min(room // 2, pad)
+
+
+def _repair_soft_tiles(image, output, ys, xs, inner, pad, tile, upscale_x4, shrink, factor, reporter):
+    """Dlaždice měkčí než originál se vykreslí znovu a nahradí, jen když je ostřejší."""
+    height, width = image.shape[:2]
+    soft = []
+    for top in ys:
+        bottom = min(height, top + inner)
+        for left in xs:
+            right = min(width, left + inner)
+            if bottom - top < 8 or right - left < 8:
+                continue
+            source = image[top:bottom, left:right]
+            current = output[top * factor : bottom * factor, left * factor : right * factor]
+            if _lost_detail(source, current, factor):
+                soft.append((top, bottom, left, right))
+    if reporter is not None:
+        reporter.emit(0.9, f"kontrola ostrosti · měkké dlaždice {len(soft)}", force=True)
+    if not soft:
+        return 0
+    context = _repair_context(tile, pad, inner)
+    if context <= pad:
+        if reporter is not None:
+            reporter.emit(1.0, "kontrola ostrosti · větší okolí se nevejde, dlaždice nechávám", force=True)
+        return 0
+    allow_bigger = True
+    fixed = 0
+    for index, (top, bottom, left, right) in enumerate(soft, start=1):
+        source = image[top:bottom, left:right]
+        y0 = top * factor
+        x0 = left * factor
+        y1 = bottom * factor
+        x1 = right * factor
+        current = np.array(output[y0:y1, x0:x1])
+        keep_old = _detail_keep(source, current, factor)
+        chosen = None
+        if allow_bigger:
+            try:
+                chosen = _scale_region(image, top, bottom, left, right, context, upscale_x4, shrink)
+            except GpuOutOfMemory:
+                allow_bigger = False
+                chosen = None
+                gc.collect()
+                if reporter is not None:
+                    reporter.emit(0.9, "na větší okolí není paměť, další měkké dlaždice nechávám", force=True)
+        if chosen is not None and chosen.shape != current.shape:
+            chosen = None
+        keep_new = _detail_keep(source, chosen, factor) if chosen is not None else 0.0
+        if chosen is not None and (keep_new < keep_old * 1.15 or keep_new < keep_old + 0.12):
+            chosen = None
+        if chosen is not None:
+            output[y0:y1, x0:x1] = chosen
+            fixed += 1
+        del chosen, current
+        if reporter is not None:
+            reporter.emit(
+                0.9 + 0.1 * index / len(soft),
+                f"kontrola ostrosti · přerender {index}/{len(soft)} · opraveno {fixed}",
+                force=index == len(soft),
+            )
+    return fixed
+
+
+def _lost_detail(source: np.ndarray, scaled: np.ndarray, factor: int) -> bool:
+    keep, source_sharp = _detail_keep(source, scaled, factor, with_source=True)
+    return source_sharp >= 6.0 and keep < 0.85
+
+
+def _detail_keep(source: np.ndarray, scaled: np.ndarray, factor: int, with_source: bool = False):
+    reduced = _box_down(scaled, factor)
+    height = min(reduced.shape[0], source.shape[0])
+    width = min(reduced.shape[1], source.shape[1])
+    if height < 3 or width < 3:
+        return (1.0, 0.0) if with_source else 1.0
+    source_sharp = _sharpness(source[:height, :width])
+    output_sharp = _sharpness(reduced[:height, :width])
+    keep = output_sharp / (source_sharp + 1e-3)
+    if with_source:
+        return keep, source_sharp
+    return keep
+
+
+def _sharpness(image: np.ndarray) -> float:
+    luma = np.asarray(image, dtype=np.float32)
+    if luma.ndim == 3:
+        luma = 0.2126 * luma[:, :, 0] + 0.7152 * luma[:, :, 1] + 0.0722 * luma[:, :, 2]
+    if luma.shape[0] < 3 or luma.shape[1] < 3:
+        return 0.0
+    vertical = np.abs(luma[2:, 1:-1] - 2.0 * luma[1:-1, 1:-1] + luma[:-2, 1:-1])
+    horizontal = np.abs(luma[1:-1, 2:] - 2.0 * luma[1:-1, 1:-1] + luma[1:-1, :-2])
+    return float(vertical.mean() + horizontal.mean())
+
+
+def _box_down(image: np.ndarray, factor: int) -> np.ndarray:
+    factor = max(1, int(factor))
+    height = int(image.shape[0]) // factor * factor
+    width = int(image.shape[1]) // factor * factor
+    if height < factor or width < factor:
+        return np.asarray(image, dtype=np.float32)
+    cropped = np.asarray(image[:height, :width], dtype=np.float32)
+    channels = cropped.shape[2]
+    return cropped.reshape(height // factor, factor, width // factor, factor, channels).mean(axis=(1, 3))
 
 
 def _edge_pad(tile: int) -> int:
