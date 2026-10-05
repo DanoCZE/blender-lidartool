@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import numpy as np
-from rasterio.transform import Affine
 
 
-def viewshed_mask(elev: np.ndarray, xs: np.ndarray, ys: np.ndarray, eyes: np.ndarray, n_bins: int = 360) -> np.ndarray:
+def viewshed_mask(
+    elev: np.ndarray,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    eyes: np.ndarray,
+    n_bins: int = 360,
+    radius_m: float | None = None,
+) -> np.ndarray:
     elev = np.asarray(elev, dtype=np.float64)
     xs = np.asarray(xs, dtype=np.float64)
     ys = np.asarray(ys, dtype=np.float64)
@@ -18,7 +24,8 @@ def viewshed_mask(elev: np.ndarray, xs: np.ndarray, ys: np.ndarray, eyes: np.nda
     pixel = max(min(abs(x_step), abs(y_step)), 1e-6)
     x0 = float(xs[0, 0])
     y0 = float(ys[0, 0])
-    max_radius = float(np.hypot(xs.max() - xs.min(), ys.max() - ys.min()))
+    span = float(np.hypot(xs.max() - xs.min(), ys.max() - ys.min()))
+    max_radius = span if not radius_m or radius_m <= 0 else min(span, float(radius_m))
     ray_count = int(np.clip(max(n_bins, 2 * np.pi * max_radius / pixel), 180, 1440))
     angles = np.linspace(-np.pi, np.pi, ray_count, endpoint=False)
     steps = np.arange(pixel, max_radius + pixel, pixel)
@@ -40,14 +47,47 @@ def viewshed_mask(elev: np.ndarray, xs: np.ndarray, ys: np.ndarray, eyes: np.nda
         previous[:, 1:] = running[:, :-1]
         hit = valid & (slope + 1e-6 >= previous)
         visible[rows[hit], cols[hit]] = True
+        eye_col = int(np.rint((eye_x - x0) / x_step))
+        eye_row = int(np.rint((eye_y - y0) / y_step))
+        if 0 <= eye_row < height and 0 <= eye_col < width and finite[eye_row, eye_col]:
+            visible[eye_row, eye_col] = True
     visible &= finite
     return visible
 
 
-def downsample(array: np.ndarray, transform: Affine, max_cells: int = 350_000):
+def bake_buildings(elev: np.ndarray, xs: np.ndarray, ys: np.ndarray, footprints: list, clearance_m: float = 1.5) -> int:
+    """Zvedne buňky půdorysu na výšku střechy. footprints jsou (polygon, výška)."""
+    from shapely import contains_xy
+
+    baked = 0
+    for polygon, roof in footprints:
+        if polygon is None or polygon.is_empty or not np.isfinite(roof):
+            continue
+        minx, miny, maxx, maxy = polygon.bounds
+        candidate = (xs >= minx) & (xs <= maxx) & (ys >= miny) & (ys <= maxy)
+        if not candidate.any():
+            continue
+        inside = contains_xy(polygon, xs[candidate], ys[candidate])
+        if not inside.any():
+            continue
+        cells = np.zeros(xs.shape, dtype=bool)
+        chosen = np.flatnonzero(candidate)
+        cells.ravel()[chosen[inside]] = True
+        ground = elev[cells]
+        blocking = np.isfinite(ground) & (float(roof) - ground >= clearance_m)
+        if not blocking.any():
+            continue
+        elev[cells] = np.where(blocking, np.maximum(ground, float(roof)), ground)
+        baked += 1
+    return baked
+
+
+def downsample(array: np.ndarray, transform, max_cells: int = 350_000):
     height, width = array.shape
     if height * width <= max_cells:
         return array, transform
+    from rasterio.transform import Affine
+
     scale = int(np.ceil(np.sqrt((height * width) / max_cells)))
     reduced = array[::scale, ::scale]
     return reduced, transform * Affine.scale(scale, scale)

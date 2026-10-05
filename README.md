@@ -25,9 +25,10 @@ Panel **Terén** v postranní liště 3D okna.
 ## Práce
 
 1. **Otevřít editor** a v mapě nakreslit trať. Oranžové tlačítko ji přenese do scény.
-2. **Vložit terén** stáhne výškový model a vloží mesh.
-3. **Ortofoto na materiál** stáhne ortofoto ČÚZK. **Stáhnout ortofoto znovu** ho vymění a mesh ve scéně nechá.
-4. **AI upscale ortofota** zvětší texturu modelem Real-ESRGAN. Nejdřív v panelu nainstalujte AI model. Chce grafiku NVIDIA. Složku instalace i odinstalaci nastavíte tamtéž. Upscale jde spustit z originálu, nebo z už zvětšené verze.
+2. V editoru jde přepnout na **Budovy**, kliknutím vybrat půdorysy a vložit je do kolekce **Budovy**. Střecha je z DMP OK, pata z DMR 5G. Editor při tom zůstane otevřený.
+3. **Vložit terén** stáhne výškový model a vloží mesh.
+4. **Ortofoto na materiál** stáhne ortofoto ČÚZK. **Stáhnout ortofoto znovu** ho vymění a mesh ve scéně nechá.
+5. **AI upscale ortofota** zvětší texturu modelem Real-ESRGAN. Nejdřív v panelu nainstalujte AI model. Chce grafiku NVIDIA. Složku instalace i odinstalaci nastavíte tamtéž. Upscale jde spustit z originálu, nebo z už zvětšené verze.
 
 Podrobný popis mapového editoru je v `editor/help.md`.
 
@@ -37,13 +38,15 @@ Data map a model se do archivu addonu nekopírují. Stahují se až při práci 
 
 ### ČÚZK
 
-Výšky a ortofoto pocházejí z otevřených dat Českého úřadu zeměměřického a katastrálního: ortofoto České republiky, digitální model reliéfu 5. generace (DMR 5G) a digitální model povrchu 1. generace (DMP 1G). Jsou pod licencí [Creative Commons BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.cs). Podmínky poskytování jsou na [Geoportálu ČÚZK](https://geoportal.cuzk.gov.cz/Dokumenty/Podminky.pdf).
+Výšky a ortofoto pocházejí z otevřených dat Českého úřadu zeměměřického a katastrálního: ortofoto České republiky, digitální model reliéfu 5. generace (DMR 5G), digitální model povrchu 1. generace (DMP 1G) a digitální model povrchu z obrazové korelace (DMP OK). Půdorysy budov jsou ze ZABAGED. Jsou pod licencí [Creative Commons BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.cs). Podmínky poskytování jsou na [Geoportálu ČÚZK](https://geoportal.cuzk.gov.cz/Dokumenty/Podminky.pdf).
 
 Služby, které addon volá:
 
 - ortofoto: `https://ags.cuzk.gov.cz/arcgis1/rest/services/ORTOFOTO_WM/MapServer`
 - DMR 5G: `https://ags.cuzk.gov.cz/arcgis2/rest/services/dmr5g/ImageServer`
 - DMP 1G: `https://ags.cuzk.gov.cz/arcgis2/rest/services/dmp1g/ImageServer`
+- DMP OK: `https://ags.cuzk.gov.cz/arcgis2/rest/services/dmp/ImageServer`
+- budovy ZABAGED: `https://ags.cuzk.gov.cz/arcgis/rest/services/ZABAGED_POLOHOPIS/MapServer/99`
 
 Kdo zveřejní trať z těchto dat, uvede zdroj a licenci. U textury zvětšené modelem Real-ESRGAN uvede i úpravu. Vhodné znění: „Výšky a ortofoto: © Český úřad zeměměřický a katastrální, licencováno pod CC BY 4.0. Ortofoto bylo zvětšeno modelem Real-ESRGAN (BSD-3-Clause).“
 

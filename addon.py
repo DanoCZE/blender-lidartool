@@ -472,6 +472,17 @@ class _Job:
         self.report({"INFO"}, payload.get("message") or "Trať je uložená.")
 
 
+def _building_selection(scene) -> list:
+    try:
+        raw = json.loads(scene.lidar_buildings or "[]")
+    except json.JSONDecodeError:
+        return []
+    try:
+        return editor_server.normalize_building_selection(raw)
+    except ValueError:
+        return []
+
+
 def _track_args(context, command, extra=()):
     cache = _cache(context)
     segments = json.loads(context.scene.lidar_track or "[]")
@@ -507,6 +518,7 @@ class LIDAR_OT_editor(bpy.types.Operator):
             editor_server.restore_reference_file(image)
         try:
             project = _project(context.scene)
+            keep_buildings = _editor_running()
             url = editor_server.open_session(
                 segments,
                 project["zones"],
@@ -516,6 +528,8 @@ class LIDAR_OT_editor(bpy.types.Operator):
                 project["osrm_url"],
                 context.scene.lidar_profile,
                 project["road_buffer_m"],
+                _building_selection(context.scene),
+                keep_buildings,
             )
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
@@ -524,6 +538,13 @@ class LIDAR_OT_editor(bpy.types.Operator):
         self._output = _cache(context) / "OUTPUT"
         self._output.mkdir(parents=True, exist_ok=True)
         revision, _segments, _zones, _buffer, _brushes, _reference_state, _corridor = editor_server.latest_apply()
+        self._building_revision, _pending = editor_server.latest_buildings()
+        self._building_selection_revision = editor_server.latest_building_selection()[0]
+        self._building_proc = None
+        self._visibility_revision = editor_server.latest_visibility()[0]
+        self._visibility_proc = None
+        self._building_busy = False
+        self._building_wait_reported = False
         context.scene.lidar_status = "Editor je otevřený. Tlačítko v mapě přenese trať a zóny."
         if _editor_running():
             self.report({"INFO"}, "Editor je otevřený v prohlížeči.")
@@ -544,6 +565,9 @@ class LIDAR_OT_editor(bpy.types.Operator):
             context.scene.lidar_status = "Editor je zavřený."
             _redraw(context)
             return {"CANCELLED"}
+        self._poll_buildings(context)
+        self._poll_building_selection(context)
+        self._poll_visibility(context)
         revision, segments, zones, terrain_buffer_m, brushes, reference, corridor_m = editor_server.latest_apply()
         if revision != self._revision and segments:
             self._revision = revision
@@ -573,8 +597,250 @@ class LIDAR_OT_editor(bpy.types.Operator):
             _redraw(context)
         return {"RUNNING_MODAL"}
 
+    def _poll_visibility(self, context) -> None:
+        global _BUSY
+        proc = getattr(self, "_visibility_proc", None)
+        if proc is not None:
+            status_path = getattr(self, "_visibility_status", None)
+            status = _read_status(status_path) if status_path is not None else None
+            if status:
+                context.scene.lidar_status = f"{int(status['pct'])} % {status['message']}"
+                _sync_log(context.scene, status, self)
+                _redraw(context)
+            if proc.poll() is None:
+                return
+            self._finish_visibility(context, status)
+            return
+        revision, segments, features = editor_server.latest_visibility()
+        if revision == getattr(self, "_visibility_revision", 0):
+            return
+        if not segments or len(segments[0]) < 2:
+            self._visibility_revision = revision
+            return
+        if _BUSY:
+            if not getattr(self, "_visibility_wait_reported", False):
+                context.scene.lidar_status = "Počkejte, než doběhne probíhající úloha."
+                self._visibility_wait_reported = True
+            return
+        self._visibility_wait_reported = False
+        self._visibility_revision = revision
+        self._start_visibility(context, segments, features)
+
+    def _start_visibility(self, context, segments, features) -> None:
+        global _BUSY
+        cache = _cache(context)
+        request_path = cache / "TEMP" / "visibility_request.json"
+        request_path.write_text(
+            json.dumps({"cache": str(cache), "segments": segments, "features": features}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self._visibility_status = cache / "TEMP" / "status.json"
+        self._visibility_output = cache / "OUTPUT"
+        self._visibility_log_path = cache / "TEMP" / "worker.log"
+        self._event_count = 0
+        if self._visibility_status.exists():
+            self._visibility_status.unlink()
+        try:
+            self._visibility_proc, self._visibility_log = runtime.start_worker(
+                ["--status", str(self._visibility_status), "visibility", "--request", str(request_path)],
+                self._visibility_log_path,
+            )
+        except Exception as exc:
+            self._visibility_proc = None
+            editor_server.fail_visibility(self._visibility_revision, str(exc))
+            context.scene.lidar_status = str(exc)
+            self.report({"ERROR"}, str(exc))
+            _redraw(context)
+            return
+        _BUSY = True
+        self._visibility_busy = True
+        context.scene.lidar_status = "Počítám viditelnost"
+        _append_log(context.scene, "Viditelnost spuštěna")
+        _redraw(context)
+
+    def _finish_visibility(self, context, status) -> None:
+        global _BUSY
+        proc = self._visibility_proc
+        self._visibility_proc = None
+        _BUSY = False
+        self._visibility_busy = False
+        runtime.watch_process(None)
+        handle = getattr(self, "_visibility_log", None)
+        if handle is not None:
+            handle.close()
+            self._visibility_log = None
+        status = _read_status(self._visibility_status) or status
+        if status:
+            _sync_log(context.scene, status, self)
+        revision = getattr(self, "_visibility_revision", 0)
+        if proc is None or proc.returncode != 0:
+            message = (status or {}).get("error") or _log_tail(getattr(self, "_visibility_log_path", Path())) or "Viditelnost se nepodařilo spočítat."
+            editor_server.fail_visibility(revision, message)
+            context.scene.lidar_status = message
+            if not (context.scene.lidar_log or "").rstrip().endswith(message):
+                _append_log(context.scene, message)
+            self.report({"ERROR"}, message)
+            _redraw(context)
+            return
+        output = getattr(self, "_visibility_output", _cache(context) / "OUTPUT")
+        meta_path = output / "visibility.json"
+        png = output / "visibility.png"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not png.is_file():
+                raise ValueError("Viditelnost se nepodařilo uložit.")
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            message = str(exc)
+            editor_server.fail_visibility(revision, message)
+            context.scene.lidar_status = message
+            self.report({"ERROR"}, message)
+            _redraw(context)
+            return
+        editor_server.publish_visibility(revision, meta, png)
+        message = (status or {}).get("message") or str(meta.get("message") or "Viditelnost je na mapě.")
+        context.scene.lidar_status = message
+        self.report({"INFO"}, message)
+        _redraw(context)
+
+    def _poll_building_selection(self, context) -> None:
+        revision, features = editor_server.latest_building_selection()
+        if revision == getattr(self, "_building_selection_revision", 0):
+            return
+        self._building_selection_revision = revision
+        context.scene.lidar_buildings = json.dumps(features, ensure_ascii=False)
+
+    def _poll_buildings(self, context) -> None:
+        global _BUSY
+        proc = getattr(self, "_building_proc", None)
+        if proc is not None:
+            status_path = getattr(self, "_building_status", None)
+            status = _read_status(status_path) if status_path is not None else None
+            if status:
+                context.scene.lidar_status = f"{int(status['pct'])} % {status['message']}"
+                _sync_log(context.scene, status, self)
+                _redraw(context)
+            if proc.poll() is None:
+                return
+            self._finish_buildings(context, status)
+            return
+        revision, features = editor_server.latest_buildings()
+        if revision == getattr(self, "_building_revision", 0):
+            return
+        if not features:
+            self._building_revision = revision
+            return
+        if _BUSY:
+            if not getattr(self, "_building_wait_reported", False):
+                context.scene.lidar_status = "Počkejte, než doběhne probíhající úloha."
+                self.report({"WARNING"}, "Počkejte, než doběhne probíhající úloha.")
+                self._building_wait_reported = True
+            return
+        self._building_wait_reported = False
+        self._building_revision = revision
+        self._start_buildings(context, features)
+
+    def _start_buildings(self, context, features) -> None:
+        global _BUSY
+        cache = _cache(context)
+        try:
+            segments = json.loads(context.scene.lidar_track or "[]")
+        except json.JSONDecodeError:
+            segments = []
+        if not isinstance(segments, list):
+            segments = []
+        request_path = cache / "TEMP" / "buildings_request.json"
+        request_path.write_text(
+            json.dumps({"cache": str(cache), "segments": segments, "features": features}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self._building_status = cache / "TEMP" / "status.json"
+        self._building_output = cache / "OUTPUT"
+        self._building_log_path = cache / "TEMP" / "worker.log"
+        self._event_count = 0
+        if self._building_status.exists():
+            self._building_status.unlink()
+        try:
+            self._building_proc, self._building_log = runtime.start_worker(
+                ["--status", str(self._building_status), "buildings", "--request", str(request_path)],
+                self._building_log_path,
+            )
+        except Exception as exc:
+            self._building_proc = None
+            context.scene.lidar_status = str(exc)
+            self.report({"ERROR"}, str(exc))
+            _redraw(context)
+            return
+        _BUSY = True
+        self._building_busy = True
+        context.scene.lidar_status = "Připravuji budovy"
+        _append_log(context.scene, "Budovy spuštěny")
+        _redraw(context)
+
+    def _finish_buildings(self, context, status) -> None:
+        global _BUSY
+        proc = self._building_proc
+        self._building_proc = None
+        _BUSY = False
+        self._building_busy = False
+        runtime.watch_process(None)
+        handle = getattr(self, "_building_log", None)
+        if handle is not None:
+            handle.close()
+            self._building_log = None
+        status = _read_status(self._building_status) or status
+        if status:
+            _sync_log(context.scene, status, self)
+        if proc is None or proc.returncode != 0:
+            message = (status or {}).get("error") or _log_tail(getattr(self, "_building_log_path", Path())) or "Budovy se nepodařilo sestavit."
+            context.scene.lidar_status = message
+            if not (context.scene.lidar_log or "").rstrip().endswith(message):
+                _append_log(context.scene, message)
+            self.report({"ERROR"}, message)
+            _redraw(context)
+            return
+        try:
+            scene.insert_buildings(context, self._building_output)
+        except Exception as exc:
+            context.scene.lidar_status = str(exc)
+            self.report({"ERROR"}, str(exc))
+            _redraw(context)
+            return
+        message = (status or {}).get("message") or "Budovy jsou ve scéně."
+        context.scene.lidar_status = message
+        self.report({"INFO"}, message)
+        _redraw(context)
+
     def cancel(self, context):
+        global _BUSY
         _set_editor_running(False)
+        proc = getattr(self, "_building_proc", None)
+        if proc is not None and proc.poll() is None:
+            runtime.cancel_current()
+            if proc.poll() is None:
+                proc.kill()
+        if getattr(self, "_building_busy", False):
+            _BUSY = False
+            self._building_busy = False
+        handle = getattr(self, "_building_log", None)
+        if handle is not None:
+            handle.close()
+            self._building_log = None
+        self._building_proc = None
+        proc = getattr(self, "_visibility_proc", None)
+        if proc is not None and proc.poll() is None:
+            runtime.cancel_current()
+            if proc.poll() is None:
+                proc.kill()
+        if getattr(self, "_visibility_busy", False):
+            _BUSY = False
+            self._visibility_busy = False
+        handle = getattr(self, "_visibility_log", None)
+        if handle is not None:
+            handle.close()
+            self._visibility_log = None
+        self._visibility_proc = None
+        runtime.watch_process(None)
+        self._poll_building_selection(context)
         _detach(context, self)
         timer = getattr(self, "_timer", None)
         if timer is not None:
@@ -1226,6 +1492,7 @@ SCENE_PROPS = (
         set=_ai_dir_set,
     )),
     ("lidar_track", bpy.props.StringProperty(default="[]")),
+    ("lidar_buildings", bpy.props.StringProperty(default="[]")),
     ("lidar_points", bpy.props.IntProperty(name="Body", default=0)),
     ("lidar_length", bpy.props.FloatProperty(name="Délka", default=0.0)),
     ("lidar_status", bpy.props.StringProperty(name="Stav", default="Připraveno")),

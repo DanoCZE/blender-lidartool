@@ -45,6 +45,24 @@ _MAX_REFERENCE = 40_000_000
 _OSRM = "https://router.project-osrm.org"
 _PROFILE = "driving"
 _PROFILES = ("driving", "cycling", "walking")
+_BUILDINGS_REVISION = 0
+_BUILDINGS_FEATURES: list = []
+_BUILDING_SELECTION: list = []
+_BUILDING_SELECTION_REVISION = 0
+_BUILDING_SELECTION_SERIAL = 0
+_VISIBILITY_REVISION = 0
+_VISIBILITY_SEGMENTS: list = []
+_VISIBILITY_FEATURES: list = []
+_VISIBILITY_READY = 0
+_VISIBILITY_FAILED = 0
+_VISIBILITY_ERROR = ""
+_VISIBILITY_META: dict | None = None
+_VISIBILITY_PNG: Path | None = None
+_MAX_BUILDINGS = 200
+_MAX_RING_POINTS = 4000
+ZABAGED_BUILDINGS_URL = (
+    "https://ags.cuzk.gov.cz/arcgis/rest/services/ZABAGED_POLOHOPIS/MapServer/99/query"
+)
 
 
 def normalize_segments(payload) -> list:
@@ -234,13 +252,19 @@ def open_session(
     osrm_url: str = "https://router.project-osrm.org",
     profile: str = "driving",
     road_buffer_m: float = 25.0,
+    buildings: list | None = None,
+    keep_buildings: bool = False,
 ) -> str:
     global _TOKEN, _SEGMENTS, _ZONES, _BUFFER, _CORRIDOR, _BRUSHES, _REFERENCE, _OSRM, _PROFILE
+    global _BUILDINGS_REVISION, _BUILDINGS_FEATURES
+    global _BUILDING_SELECTION, _BUILDING_SELECTION_REVISION, _BUILDING_SELECTION_SERIAL
+    global _VISIBILITY_REVISION, _VISIBILITY_SEGMENTS, _VISIBILITY_FEATURES
     cleaned = normalize_segments(segments)
     cleaned_zones = normalize_zones(zones if zones is not None else DEFAULT_ZONES)
     cleaned_buffer = normalize_buffer(terrain_buffer_m)
     cleaned_brushes = normalize_brushes(brushes)
     cleaned_reference = normalize_reference(reference) if reference else _REFERENCE
+    cleaned_buildings = [] if keep_buildings else normalize_building_selection(buildings or [])
     with _LOCK:
         _TOKEN = uuid.uuid4().hex
         _SEGMENTS = cleaned
@@ -253,6 +277,15 @@ def open_session(
         _PROFILE = clean_profile(profile)
         osrm = str(osrm_url or "").strip()
         _OSRM = osrm if osrm.startswith(("http://", "https://")) else "https://router.project-osrm.org"
+        _BUILDINGS_REVISION = 0
+        _BUILDINGS_FEATURES = []
+        if not keep_buildings:
+            _BUILDING_SELECTION = cleaned_buildings
+            _BUILDING_SELECTION_REVISION += 1
+        _BUILDING_SELECTION_SERIAL = 0
+        _VISIBILITY_REVISION = 0
+        _VISIBILITY_SEGMENTS = []
+        _VISIBILITY_FEATURES = []
         token = _TOKEN
     _ensure_server()
     assert _SERVER is not None
@@ -271,6 +304,46 @@ def latest_apply() -> tuple[int, list, list, float, list, dict | None, float]:
             None if _APPLIED_REFERENCE is None else dict(_APPLIED_REFERENCE),
             _APPLIED_CORRIDOR,
         )
+
+
+def latest_buildings() -> tuple[int, list]:
+    with _LOCK:
+        return _BUILDINGS_REVISION, json.loads(json.dumps(_BUILDINGS_FEATURES))
+
+
+def latest_building_selection() -> tuple[int, list]:
+    with _LOCK:
+        return _BUILDING_SELECTION_REVISION, json.loads(json.dumps(_BUILDING_SELECTION))
+
+
+def latest_visibility() -> tuple[int, list, list]:
+    with _LOCK:
+        return (
+            _VISIBILITY_REVISION,
+            json.loads(json.dumps(_VISIBILITY_SEGMENTS)),
+            json.loads(json.dumps(_VISIBILITY_FEATURES)),
+        )
+
+
+def publish_visibility(revision: int, meta: dict, png: Path) -> None:
+    global _VISIBILITY_READY, _VISIBILITY_FAILED, _VISIBILITY_ERROR, _VISIBILITY_META, _VISIBILITY_PNG
+    with _LOCK:
+        if revision != _VISIBILITY_REVISION:
+            return
+        _VISIBILITY_READY = revision
+        _VISIBILITY_FAILED = 0
+        _VISIBILITY_ERROR = ""
+        _VISIBILITY_META = dict(meta)
+        _VISIBILITY_PNG = png
+
+
+def fail_visibility(revision: int, message: str) -> None:
+    global _VISIBILITY_FAILED, _VISIBILITY_ERROR
+    with _LOCK:
+        if revision != _VISIBILITY_REVISION:
+            return
+        _VISIBILITY_FAILED = revision
+        _VISIBILITY_ERROR = message
 
 
 def reference_path() -> Path:
@@ -475,6 +548,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "reference": None if _REFERENCE is None or not _REFERENCE_PATH.is_file() else _REFERENCE,
                     "reference_ready": _REFERENCE_PATH.is_file(),
                     "profile": _PROFILE,
+                    "buildings": json.loads(json.dumps(_BUILDING_SELECTION)),
                 }
             self._send_json(200, payload)
             return
@@ -493,6 +567,15 @@ class _Handler(BaseHTTPRequestHandler):
             except URLError:
                 self._send_json(502, {"detail": "Vyhledání adresy se nezdařilo."})
             return
+        if path == "/api/buildings":
+            self._query_buildings()
+            return
+        if path == "/api/visibility":
+            self._visibility_status()
+            return
+        if path == "/api/visibility.png":
+            self._visibility_image()
+            return
         if self._send_static(path):
             return
         self._send_json(404, {"detail": "Stránka neexistuje."})
@@ -504,6 +587,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/track/edit":
             self._edit_track()
+            return
+        if path == "/api/buildings/selection":
+            self._save_building_selection()
+            return
+        if path == "/api/visibility":
+            self._queue_visibility()
+            return
+        if path == "/api/buildings":
+            self._queue_buildings()
             return
         if path != "/api/track":
             self._send_json(404, {"detail": "Stránka neexistuje."})
@@ -585,6 +677,144 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             _SEGMENTS = updated
         self._send_json(200, {"segments": updated, "message": message})
+
+    def _visibility_status(self) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        token = (query.get("token") or [""])[0]
+        with _LOCK:
+            if token != _TOKEN:
+                self._send_json(409, {"detail": "Editor byl otevřený znovu. Obnovte stránku."})
+                return
+            meta = dict(_VISIBILITY_META or {})
+            payload = {
+                "request": _VISIBILITY_REVISION,
+                "ready": _VISIBILITY_READY,
+                "failed": _VISIBILITY_FAILED,
+                "error": _VISIBILITY_ERROR,
+            }
+            if _VISIBILITY_READY == _VISIBILITY_REVISION and _VISIBILITY_READY:
+                payload.update(
+                    {
+                        "south": meta.get("south"),
+                        "west": meta.get("west"),
+                        "north": meta.get("north"),
+                        "east": meta.get("east"),
+                        "message": meta.get("message") or "",
+                    }
+                )
+        self._send_json(200, payload)
+
+    def _visibility_image(self) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        token = (query.get("token") or [""])[0]
+        with _LOCK:
+            if token != _TOKEN:
+                self._send_json(409, {"detail": "Editor byl otevřený znovu. Obnovte stránku."})
+                return
+            png = _VISIBILITY_PNG
+        if png is None or not png.is_file():
+            self._send_json(404, {"detail": "Viditelnost ještě není spočítaná."})
+            return
+        self._send(200, png.read_bytes(), "image/png")
+
+    def _queue_visibility(self) -> None:
+        global _VISIBILITY_REVISION, _VISIBILITY_SEGMENTS, _VISIBILITY_FEATURES
+        length = int(self.headers.get("Content-Length") or "0")
+        if length <= 0 or length > 8_000_000:
+            self._send_json(400, {"detail": "Požadavek na viditelnost je prázdný nebo příliš velký."})
+            return
+        raw = self.rfile.read(length)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            token = str(body.get("token") or "")
+            segments = normalize_segments(body)
+            features = normalize_building_selection(body.get("features"))
+            if not segments or len(segments[0]) < 2:
+                raise ValueError("Viditelnost potřebuje trať aspoň se dvěma body.")
+        except (json.JSONDecodeError, UnicodeError, TypeError, ValueError) as exc:
+            self._send_json(400, {"detail": str(exc) if isinstance(exc, ValueError) else "Neplatný požadavek na viditelnost."})
+            return
+        with _LOCK:
+            if token != _TOKEN:
+                self._send_json(409, {"detail": "Editor byl otevřený znovu. Obnovte stránku."})
+                return
+            _VISIBILITY_SEGMENTS = segments
+            _VISIBILITY_FEATURES = features
+            _VISIBILITY_REVISION += 1
+            revision = _VISIBILITY_REVISION
+        self._send_json(200, {"revision": revision, "message": "Počítám viditelnost z tratě."})
+
+    def _query_buildings(self) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        token = (query.get("token") or [""])[0]
+        with _LOCK:
+            if token != _TOKEN:
+                self._send_json(409, {"detail": "Editor byl otevřený znovu. Obnovte stránku."})
+                return
+        try:
+            payload = query_buildings(query)
+        except ValueError as exc:
+            self._send_json(400, {"detail": str(exc)})
+        except (URLError, TimeoutError, json.JSONDecodeError, UnicodeError):
+            self._send_json(502, {"detail": "Půdorysy budov se nepodařilo načíst."})
+        else:
+            self._send_json(200, payload)
+
+    def _save_building_selection(self) -> None:
+        global _BUILDING_SELECTION, _BUILDING_SELECTION_REVISION, _BUILDING_SELECTION_SERIAL
+        length = int(self.headers.get("Content-Length") or "0")
+        if length <= 0 or length > 8_000_000:
+            self._send_json(400, {"detail": "Výběr budov je prázdný nebo příliš velký."})
+            return
+        raw = self.rfile.read(length)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            token = str(body.get("token") or "")
+            serial = int(body.get("serial") or 0)
+            features = normalize_building_selection(body.get("features"))
+        except (json.JSONDecodeError, UnicodeError, TypeError, ValueError) as exc:
+            self._send_json(400, {"detail": str(exc) if isinstance(exc, ValueError) else "Neplatný výběr budov."})
+            return
+        with _LOCK:
+            if token != _TOKEN:
+                self._send_json(409, {"detail": "Editor byl otevřený znovu. Obnovte stránku."})
+                return
+            if serial < _BUILDING_SELECTION_SERIAL:
+                self._send_json(200, {"ok": True})
+                return
+            _BUILDING_SELECTION_SERIAL = serial
+            _BUILDING_SELECTION = features
+            _BUILDING_SELECTION_REVISION += 1
+        self._send_json(200, {"ok": True})
+
+    def _queue_buildings(self) -> None:
+        global _BUILDINGS_REVISION, _BUILDINGS_FEATURES
+        length = int(self.headers.get("Content-Length") or "0")
+        if length <= 0 or length > 8_000_000:
+            self._send_json(400, {"detail": "Výběr budov je prázdný nebo příliš velký."})
+            return
+        raw = self.rfile.read(length)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            token = str(body.get("token") or "")
+            features = normalize_building_features(body.get("features"))
+        except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
+            self._send_json(400, {"detail": str(exc) if isinstance(exc, ValueError) else "Neplatný výběr budov."})
+            return
+        with _LOCK:
+            if token != _TOKEN:
+                self._send_json(409, {"detail": "Editor byl otevřený znovu. Obnovte stránku."})
+                return
+            _BUILDINGS_FEATURES = features
+            _BUILDINGS_REVISION += 1
+            revision = _BUILDINGS_REVISION
+        self._send_json(
+            200,
+            {
+                "revision": revision,
+                "message": "Budovy se připravují ve Blenderu. Editor zůstane otevřený.",
+            },
+        )
 
     def _save_reference(self) -> None:
         global _REFERENCE_TYPE
@@ -671,6 +901,152 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: dict) -> None:
         self._send(status, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+
+def _bbox_value(query: dict, key: str) -> float:
+    try:
+        return float((query.get(key) or [""])[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Výřez mapy je neplatný.") from exc
+
+
+def query_buildings(query: dict) -> dict:
+    min_lon = _bbox_value(query, "minx")
+    min_lat = _bbox_value(query, "miny")
+    max_lon = _bbox_value(query, "maxx")
+    max_lat = _bbox_value(query, "maxy")
+    if not (-180.0 <= min_lon < max_lon <= 180.0 and -90.0 <= min_lat < max_lat <= 90.0):
+        raise ValueError("Výřez mapy je mimo rozsah.")
+    if (max_lon - min_lon) > 0.12 or (max_lat - min_lat) > 0.08:
+        raise ValueError("Výřez je moc velký. Přibližte mapu.")
+    params = urlencode(
+        {
+            "geometry": f"{min_lon},{min_lat},{max_lon},{max_lat}",
+            "geometryType": "esriGeometryEnvelope",
+            "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "fid_zbg,jmeno,druhbud",
+            "returnGeometry": "true",
+            "outSR": "4326",
+            "f": "geojson",
+            "resultRecordCount": 2000,
+        }
+    )
+    request = Request(
+        f"{ZABAGED_BUILDINGS_URL}?{params}",
+        headers={"User-Agent": "TrackTerrain-Blender/0.1", "Accept": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=40) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except URLError as exc:
+        raise ValueError("Půdorysy budov se nepodařilo načíst.") from exc
+    if not isinstance(payload, dict) or payload.get("error"):
+        raise ValueError("Půdorysy budov se nepodařilo načíst.")
+    features = []
+    for item in payload.get("features") or []:
+        if not isinstance(item, dict):
+            continue
+        props = item.get("properties") or {}
+        fid = str(props.get("fid_zbg") or "").strip()
+        geometry = item.get("geometry")
+        if not fid or not isinstance(geometry, dict):
+            continue
+        try:
+            cleaned = _clean_geometry(geometry)
+        except ValueError:
+            continue
+        name = props.get("jmeno") or ""
+        kind = props.get("druhbud") or ""
+        features.append(
+            {
+                "type": "Feature",
+                "properties": {
+                    "id": fid,
+                    "name": "" if name is None else str(name).strip(),
+                    "kind": "" if kind is None else str(kind).strip(),
+                },
+                "geometry": cleaned,
+            }
+        )
+    truncated = bool(payload.get("exceededTransferLimit")) or len(features) >= 2000
+    return {"features": features, "truncated": truncated}
+
+
+def normalize_building_selection(raw) -> list:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("Výběr budov je neplatný.")
+    if not raw:
+        return []
+    return normalize_building_features(raw)
+
+
+def normalize_building_features(raw) -> list:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("Vyberte aspoň jednu budovu.")
+    if len(raw) > _MAX_BUILDINGS:
+        raise ValueError("Najednou jde vložit nejvýš 200 budov.")
+    features = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("Půdorys budovy je neplatný.")
+        fid = str(item.get("id") or "").strip()
+        if not fid or len(fid) > 64 or fid in seen:
+            raise ValueError("Půdorys budovy nemá platné označení.")
+        seen.add(fid)
+        name = item.get("name") or ""
+        kind = item.get("kind") or ""
+        features.append(
+            {
+                "id": fid,
+                "name": ("" if name is None else str(name).strip())[:120],
+                "kind": ("" if kind is None else str(kind).strip())[:120],
+                "geometry": _clean_geometry(item.get("geometry")),
+            }
+        )
+    return features
+
+
+def _clean_geometry(geometry) -> dict:
+    if not isinstance(geometry, dict):
+        raise ValueError("Půdorys budovy je neplatný.")
+    kind = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if kind == "Polygon":
+        return {"type": "Polygon", "coordinates": _clean_polygon(coords)}
+    if kind == "MultiPolygon":
+        if not isinstance(coords, list) or not coords:
+            raise ValueError("Půdorys budovy je neplatný.")
+        return {"type": "MultiPolygon", "coordinates": [_clean_polygon(polygon) for polygon in coords]}
+    raise ValueError("Půdorys budovy musí být polygon.")
+
+
+def _clean_polygon(coords) -> list:
+    if not isinstance(coords, list) or not coords:
+        raise ValueError("Půdorys budovy je neplatný.")
+    rings = []
+    for ring in coords:
+        if not isinstance(ring, list) or len(ring) < 4:
+            raise ValueError("Půdorys budovy je neplatný.")
+        if len(ring) > _MAX_RING_POINTS:
+            raise ValueError("Půdorys budovy má moc bodů.")
+        points = []
+        for point in ring:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                raise ValueError("Půdorys budovy je neplatný.")
+            try:
+                lon = float(point[0])
+                lat = float(point[1])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Půdorys budovy je neplatný.") from exc
+            if not (-180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+                raise ValueError("Souřadnice budovy jsou mimo rozsah.")
+            points.append([lon, lat])
+        rings.append(points)
+    return rings
 
 
 def _geocode(query: str) -> list[dict]:

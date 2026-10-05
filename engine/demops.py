@@ -16,7 +16,7 @@ from rasterio.warp import calculate_default_transform, reproject
 from shapely.geometry import box
 
 from blender_lidartool.engine.crsutil import segments_to_xy, to_5514, to_wgs
-from blender_lidartool.engine.cuzk import ELEVATION_URLS, SERVICE_BOUNDS, export_image_params
+from blender_lidartool.engine.cuzk import DMR_URL, ELEVATION_URLS, SERVICE_BOUNDS, export_image_params
 from blender_lidartool.engine.geometry import (
     brush_detail_geometry,
     densify_xy,
@@ -180,6 +180,90 @@ def render_visibility(project_dir: Path, segments: list, project: dict, progress
     return {"message": "Analýza viditelnosti je hotová. Zelená plocha ukazuje, co je z tratě vidět."}
 
 
+VISIBILITY_RADIUS_M = 400.0
+VISIBILITY_EYE_M = 1.5
+VISIBILITY_SAMPLE_M = 25.0
+VISIBILITY_CLEARANCE_M = 1.5
+
+
+def render_track_visibility(cache: Path, segments: list, features: list, progress) -> str:
+    """Zelená plocha kolem tratě. DMR 5G a do něj zapečené vybrané budovy."""
+    import json
+
+    from blender_lidartool.engine.buildings import _polygons
+    from blender_lidartool.engine.visibility import bake_buildings
+
+    lines_xy = segments_to_xy(segments)
+    lines = lines_from_xy(lines_xy)
+    network = united_line(lines)
+    if network.is_empty or network.length < 1:
+        raise ValueError("Viditelnost potřebuje trať aspoň se dvěma body.")
+    if not _intersects_service(network):
+        raise ValueError("Trať leží mimo pokrytí DMR 5G.")
+    corridor = network.buffer(VISIBILITY_RADIUS_M).intersection(_service_box())
+    if corridor.is_empty:
+        raise ValueError("Kolem tratě není pokrytí DMR 5G.")
+    output = cache / "OUTPUT"
+    output.mkdir(parents=True, exist_ok=True)
+    key = _visibility_key(segments, features)
+    cached = _read_visibility_meta(output)
+    if cached and cached.get("key") == key and (output / "visibility.png").is_file():
+        progress(100, "Viditelnost je na mapě")
+        return str(cached.get("message") or "Viditelnost je na mapě.")
+
+    pixel = _visibility_pixel(network.length)
+    progress(4, "Stahuji DMR 5G kolem tratě")
+    dmr_path = cache / "TEMP" / "visibility_dmr.tif"
+    _download_corridor(DMR_URL, network, corridor, pixel, 4000, cache / "TEMP" / "visibility_dmr_tiles", dmr_path, progress, 4, 28)
+    with rasterio.open(dmr_path) as dataset:
+        array = dataset.read(1).astype(np.float64)
+        nodata = dataset.nodata if dataset.nodata is not None else -9999
+        array[array == nodata] = np.nan
+        array[(array < -500) | (array > 5000)] = np.nan
+        ground, transform = downsample(array, dataset.transform, max_cells=300_000)
+    xs, ys = grid_centers(transform, ground.shape[0], ground.shape[1])
+    footprints = _visibility_footprints(features, corridor, _polygons)
+    baked = np.array(ground, copy=True)
+    baked_count = 0
+    if footprints:
+        progress(34, "Stahuji střechy budov")
+        surface = _building_surface(cache, footprints, progress)
+        roofs = _roof_heights(footprints, surface)
+        progress(68, "Peču budovy do DMR 5G")
+        baked_count = bake_buildings(baked, xs, ys, roofs, VISIBILITY_CLEARANCE_M)
+    progress(74, "Počítám viditelnost")
+    eyes = _eyes(lines_xy, VISIBILITY_SAMPLE_M, VISIBILITY_EYE_M, ground, transform)
+    mask = viewshed_mask(baked, xs, ys, eyes, radius_m=VISIBILITY_RADIUS_M)
+    image, image_transform = _warp_mask(mask, transform)
+    rgba = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
+    rgba[image > 0, 1] = 190
+    rgba[image > 0, 3] = 140
+    Image.fromarray(rgba, "RGBA").save(output / "visibility.png")
+    left, bottom, right, top = bounds_from_transform(image_transform, image.shape[0], image.shape[1])
+    if baked_count:
+        message = (
+            f"Zeleně je z tratě vidět, do {VISIBILITY_RADIUS_M:.0f} m. "
+            f"Do DMR 5G je zapečených {baked_count} budov, ty výhled zakrývají."
+        )
+    else:
+        message = (
+            f"Zeleně je z tratě vidět, do {VISIBILITY_RADIUS_M:.0f} m. "
+            "Žádná vybraná budova v pásu není, výhled zakrývá jen terén."
+        )
+    meta = {
+        "south": float(bottom),
+        "west": float(left),
+        "north": float(top),
+        "east": float(right),
+        "key": key,
+        "message": message,
+        "buildings": baked_count,
+    }
+    (output / "visibility.json").write_text(json.dumps(meta), encoding="utf-8")
+    progress(100, "Viditelnost je na mapě")
+    return message
+
+
 def render_hillshade(project_dir: Path, source: str) -> tuple[Image.Image, dict]:
     path = _coarse_or_fine(project_dir, source)
     with rasterio.open(path) as dataset:
@@ -267,14 +351,14 @@ def _geom_probe_xy(geom) -> list[tuple[float, float]]:
     return points
 
 
-def _tiles_for_geom(geom, pixel: float):
+def _tiles_for_geom(geom, pixel: float, max_px: int = 4000):
     if geom is None or geom.is_empty:
         return []
     tiles = []
     seen = set()
     for part in _polygon_parts(geom):
         minx, miny, maxx, maxy = snap_bounds(*part.bounds, pixel)
-        for tile in iter_tiles(minx, miny, maxx, maxy, pixel):
+        for tile in iter_tiles(minx, miny, maxx, maxy, pixel, max_px=max_px):
             key = tuple(round(value, 2) for value in tile[:4])
             if key in seen:
                 continue
@@ -539,6 +623,136 @@ def _best_raster(project_dir: Path, source: str) -> Path:
         if path.exists():
             return path
     raise ValueError("Není výškový rastr k ořezu.")
+
+
+def _visibility_pixel(length_m: float) -> float:
+    pixel = 5.0
+    radius = VISIBILITY_RADIUS_M
+    while pixel < 20:
+        cells = (length_m + 2 * radius) * (2 * radius) / (pixel * pixel)
+        if cells <= 300_000:
+            return pixel
+        pixel *= 2
+    return pixel
+
+
+def _visibility_key(segments: list, features: list) -> str:
+    points = []
+    for segment in segments:
+        if not isinstance(segment, list):
+            continue
+        for point in segment:
+            if not isinstance(point, dict):
+                continue
+            points.append(f"{float(point.get('lat') or 0):.5f},{float(point.get('lon') or 0):.5f}")
+    ids = []
+    for feature in features or []:
+        if isinstance(feature, dict):
+            ids.append(str(feature.get("id") or ""))
+    return "v1|" + ";".join(points) + "#" + ",".join(sorted(ids))
+
+
+def _read_visibility_meta(output: Path):
+    path = output / "visibility.json"
+    if not path.is_file():
+        return None
+    try:
+        meta = __import__("json").loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def _download_corridor(url: str, network, corridor, pixel: float, max_px: int, folder: Path, dest: Path, progress, start: float, span: float) -> None:
+    tiles = [(*tile, "fine") for tile in _tiles_for_geom(corridor, pixel, max_px)]
+    if not tiles and getattr(network, "geom_type", "") in ("LineString", "MultiLineString"):
+        tiles = _tiles_along(network, VISIBILITY_RADIUS_M, pixel, _service_box())
+    if not tiles:
+        raise ValueError("Kolem tratě nevznikla žádná dlaždice výšek.")
+    _guard_size(tiles, "viditelnost")
+
+    def scaled(pct: float, message: str, event: str | None = None) -> None:
+        del event
+        progress(start + span * (float(pct) / 100.0), message)
+
+    if folder.exists():
+        shutil.rmtree(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    saved = _download_tiles(url, tiles, folder, scaled)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _mosaic([path for path, _kind in saved], dest)
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def _visibility_footprints(features: list, corridor, polygons_of):
+    footprints = []
+    for feature in features or []:
+        if not isinstance(feature, dict):
+            continue
+        for polygon in polygons_of(feature.get("geometry") or {}):
+            if polygon.is_empty or not polygon.intersects(corridor):
+                continue
+            footprints.append(polygon)
+    return footprints
+
+
+def _building_surface(cache: Path, footprints: list, progress):
+    from blender_lidartool.engine.cuzk import DMPOK_URL
+    from blender_lidartool.engine.rasterutil import ElevationSampler
+
+    area = sum(polygon.area for polygon in footprints)
+    pixel = 2.0 if area > 8_000_000 else 1.0
+    region = footprints[0]
+    for polygon in footprints[1:]:
+        region = region.union(polygon)
+    region = region.buffer(20.0).intersection(_service_box())
+    if region.is_empty:
+        raise ValueError("Vybrané budovy leží mimo pokrytí výškových dat ČÚZK.")
+    dest = cache / "TEMP" / "visibility_dmpok.tif"
+    _download_corridor(
+        DMPOK_URL,
+        region,
+        region,
+        pixel,
+        2048,
+        cache / "TEMP" / "visibility_dmpok_tiles",
+        dest,
+        progress,
+        34,
+        30,
+    )
+    return ElevationSampler([dest])
+
+
+def _roof_heights(footprints: list, surface) -> list:
+    from shapely import contains_xy
+
+    roofs = []
+    for polygon in footprints:
+        minx, miny, maxx, maxy = polygon.bounds
+        xs = np.arange(minx + 1.0, maxx, 2.0)
+        ys = np.arange(miny + 1.0, maxy, 2.0)
+        if xs.size == 0 or ys.size == 0:
+            xs = np.array([(minx + maxx) / 2.0])
+            ys = np.array([(miny + maxy) / 2.0])
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        flat_x = grid_x.ravel()
+        flat_y = grid_y.ravel()
+        inner = polygon.buffer(-1.5)
+        target = inner if not inner.is_empty and inner.area >= 1 else polygon
+        inside = contains_xy(target, flat_x, flat_y)
+        if not inside.any():
+            continue
+        sampled = np.asarray(surface.sample(flat_x[inside], flat_y[inside]), dtype=np.float64).reshape(-1)
+        finite = sampled[np.isfinite(sampled)]
+        if finite.size == 0:
+            continue
+        low, high = np.percentile(finite, [10, 90])
+        kept = finite[(finite >= low) & (finite <= high)]
+        if kept.size == 0:
+            kept = finite
+        roofs.append((polygon, float(np.median(kept))))
+    return roofs
 
 
 def _coarse_or_fine(project_dir: Path, source: str) -> Path:

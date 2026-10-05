@@ -168,6 +168,32 @@ def cmd_terrain(args) -> str:
     return written["message"]
 
 
+def cmd_visibility(args) -> str:
+    from blender_lidartool.engine.demops import render_track_visibility
+
+    request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+    progress = _progress(Path(args.status))
+    return render_track_visibility(
+        Path(request["cache"]),
+        request.get("segments") or [],
+        request.get("features") or [],
+        progress,
+    )
+
+
+def cmd_buildings(args) -> str:
+    from blender_lidartool.engine.buildings import build_buildings
+
+    request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+    progress = _progress(Path(args.status))
+    return build_buildings(
+        Path(request["cache"]),
+        request.get("segments") or [],
+        request.get("features") or [],
+        progress,
+    )
+
+
 def cmd_texture(args) -> str:
     from blender_lidartool.engine.mesh import load_mesh
     from blender_lidartool.engine.payload import write_layers
@@ -456,7 +482,14 @@ def build_parser() -> argparse.ArgumentParser:
     reference.add_argument("--request", required=True)
     reference.set_defaults(func=cmd_reference)
 
-    for name, func in (("terrain", cmd_terrain), ("texture", cmd_texture), ("driveline", cmd_driveline), ("upscale", cmd_upscale)):
+    for name, func in (
+        ("terrain", cmd_terrain),
+        ("texture", cmd_texture),
+        ("driveline", cmd_driveline),
+        ("upscale", cmd_upscale),
+        ("buildings", cmd_buildings),
+        ("visibility", cmd_visibility),
+    ):
         command = commands.add_parser(name)
         command.add_argument("--request", required=True)
         command.set_defaults(func=func)

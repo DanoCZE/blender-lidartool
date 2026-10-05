@@ -84,6 +84,14 @@ Pole vlevo hledá **adresu, obec nebo ulici**. Po třech znacích nabídne návr
 
 Na liště vlevo přepínáte **Ortofoto** (ČÚZK) a **Mapu OSM**. Ortofoto je podklad pro kreslení, ne finální textura ve scéně; tu stáhne **Ortofoto na materiál**.
 
+Ikona oka zapne **viditelnost** v pásu 400 m od tratě. Zelená plocha je to, co je vidět z výšky očí (1,5 m) nad osou. Podkladem je DMR 5G. Vybrané budovy se do něj zapečou podle DMP OK, takže střecha výhled zakryje. Bez vybrané budovy je vidět jen přes terén. Výpočet běží ve Blenderu, editor zůstane otevřený. Další klik vrstvu schová.
+
+## Budovy
+
+Třetí ikona vlevo přepne režim **Budovy**. Mapa musí být přiblížená (zoom 16 a blíž), jinak se půdorysy nenačtou. Klik na obrys ho vybere, další klik výběr zruší. Výběr zůstane uložený ve scéně, takže po zavření a novém otevření editoru jsou tytéž budovy zase vybrané. **Vložit budovy** pošle výběr do Blenderu a editor nechá otevřený. **Přenést** dál řeší jen trať, zóny a předlohu.
+
+Každá budova je vlastní objekt v kolekci **Budovy**. Střecha dostane ortofoto, které už je na terénu, včetně zvětšené verze. Stěny zůstanou jednobarevné. Svislé stěny končí na DMR 5G, takže budova sedí na terénu ze stejného počátku. Když terén ještě není, počátek se vezme ze středu tratě. Změna tratě potom budovy vůči novému terénu posune, dokud je nevložíte znovu. Najednou jde vložit nejvýš 200 budov. Objekt nižší než zhruba 1,5 m se přeskočí. ZABAGED někdy slučuje sousední domy do jednoho bloku; takový blok je jeden objekt.
+
 Robot vlevo dole otevře konzoli kroků: co právě běží a čím to skončilo. Červená tečka značí chybu.
 
 ## Po přenosu v panelu Terén
@@ -96,7 +104,7 @@ Nastavení z editoru (zóny, hranice, koridor, štětec, trať) už ve scéně j
 - **AI upscale** po zónách (1× až 16×, výchozí 8 / 4 / 2 / 1) a **dlaždice**. Vedle dlaždice panel ukáže odhad VRAM (384 ≈ 8 GB). Po **Ortofoto na materiál** i RAM a velikost JPEG podle největší zóny. 8× už nedělá mezikrok 16× do pagefile; výsledek se uloží jako JPEG. 16× je volitelné a pořád žere hodně paměti. Nejdřív **Nainstalovat AI model**. V panelu Terén zvolíte složku (váhy i PyTorch) a model jde **odinstalovat**. Sestavení prostředí znovu smaže jen starší PyTorch přímo ve venv; model ve zvolené složce zůstane.
 - **OSRM URL** jen když nechcete výchozí veřejný router.
 
-Pořadí, které dává smysl: **Vložit terén** → **Vložit referenci** (když je předloha) → **Ortofoto na materiál** → případně **AI upscale ortofota** → **Osa jako křivka**.
+Pořadí, které dává smysl: **Vložit terén** → v editoru **Vložit budovy**, ať sedí na hotovém terénu → **Vložit referenci** (když je předloha) → **Ortofoto na materiál** → případně **AI upscale ortofota** → **Osa jako křivka**.
 
 ## Klávesy
 

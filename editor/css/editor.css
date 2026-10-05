@@ -254,6 +254,8 @@ body:has(#zones-panel.collapsed) #bar { right: 64px; }
 .stepper input::-webkit-outer-spin-button,
 .stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .hint { margin: 0; color: var(--muted); font-size: 12px; }
+#buildings-count { margin: 0; font-weight: 650; color: var(--text); }
+#panel-buildings .btn { width: 100%; }
 
 .dropzone {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;

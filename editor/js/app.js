@@ -10,6 +10,7 @@ fetch(`/api/session?token=${encodeURIComponent(token)}`)
     if (data.reference_ready && data.reference) restoreReference(data.reference);
     else if (data.reference_ready) placeReference(map.getCenter());
     fillZones(data.zones || [], data.terrain_buffer_m || 2000, data.road_buffer_m || 25);
+    if (typeof restoreBuildingSelection === "function") restoreBuildingSelection(data.buildings || []);
     applyBrushChrome();
     try {
       draw();

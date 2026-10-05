@@ -7,6 +7,7 @@ from blender_lidartool.engine.crsutil import to_3857
 SERVICE_BOUNDS = (-904703.6, -1227414.12, -431605.6, -935118.12)
 DMR_URL = "https://ags.cuzk.gov.cz/arcgis2/rest/services/dmr5g/ImageServer/exportImage"
 DMP_URL = "https://ags.cuzk.gov.cz/arcgis2/rest/services/dmp1g/ImageServer/exportImage"
+DMPOK_URL = "https://ags.cuzk.gov.cz/arcgis2/rest/services/dmp/ImageServer/exportImage"
 ORTHO_TILE = "https://ags.cuzk.gov.cz/arcgis1/rest/services/ORTOFOTO_WM/MapServer/tile/{z}/{row}/{col}"
 ORTHO_EXPORT = "https://ags.cuzk.gov.cz/arcgis1/rest/services/ORTOFOTO_WM/MapServer/export"
 ORTHO_EXPORT_MAX = 4096

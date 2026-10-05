@@ -156,21 +156,30 @@ function setMode(mode) {
   state.mode = mode;
   document.getElementById("mode-track").classList.toggle("active", mode === "track");
   document.getElementById("mode-reference").classList.toggle("active", mode === "reference");
+  document.getElementById("mode-buildings").classList.toggle("active", mode === "buildings");
   document.getElementById("panel-zones").classList.toggle("hidden", mode !== "track");
   document.getElementById("panel-reference").classList.toggle("hidden", mode !== "reference");
+  document.getElementById("panel-buildings").classList.toggle("hidden", mode !== "buildings");
   document.getElementById("bar-track").classList.toggle("hidden", mode !== "track");
   document.getElementById("sep-track").classList.toggle("hidden", mode !== "track");
   const sidebarTitle = document.getElementById("sidebar-title");
-  if (sidebarTitle) sidebarTitle.textContent = mode === "reference" ? "Předloha" : "Zóny";
+  if (sidebarTitle) {
+    sidebarTitle.textContent = mode === "reference" ? "Předloha" : mode === "buildings" ? "Budovy" : "Zóny";
+  }
   applyModeChrome();
   renderReference();
   updateDeleteButton();
-  map.getContainer().style.cursor = mode === "reference" ? "move" : (state.brush ? "crosshair" : "");
-  setStatus(mode === "reference" ? "Upravujete předlohu. G posune, R otočí, S mění měřítko." : "Upravujete trať. Klik označí bod, Shift a klik z něj udělá křižovatku.");
+  const cursor = mode === "reference" ? "move" : mode === "buildings" ? "pointer" : (state.brush ? "crosshair" : "");
+  map.getContainer().style.cursor = cursor;
+  if (mode === "reference") setStatus("Upravujete předlohu. G posune, R otočí, S mění měřítko.");
+  else if (mode === "buildings") setStatus("Kliknutím vyberete budovu. Vložit budovy je přidá do Blenderu.");
+  else setStatus("Upravujete trať. Klik označí bod, Shift a klik z něj udělá křižovatku.");
+  if (typeof syncBuildingLayer === "function") syncBuildingLayer();
 }
 
 document.getElementById("mode-track").onclick = () => setMode("track");
 document.getElementById("mode-reference").onclick = () => setMode("reference");
+document.getElementById("mode-buildings").onclick = () => setMode("buildings");
 
 document.getElementById("brush").onclick = () => toggleBrush();
 document.getElementById("brush-radius").addEventListener("input", (event) => setBrushRadius(event.target.value));

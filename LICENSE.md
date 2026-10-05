@@ -166,7 +166,7 @@ Váhy `RealESRGAN_x4plus.pth` pocházejí z https://github.com/xinntao/Real-ESRG
 
 Tyto položky nejsou součástí kódu addonu.
 
-- Ortofoto České republiky, DMR 5G a DMP 1G: © Český úřad zeměměřický a katastrální, [Creative Commons BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.cs). Podmínky: https://geoportal.cuzk.gov.cz/Dokumenty/Podminky.pdf
+- Ortofoto České republiky, DMR 5G, DMP 1G, DMP OK a ZABAGED: © Český úřad zeměměřický a katastrální, [Creative Commons BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.cs). Podmínky: https://geoportal.cuzk.gov.cz/Dokumenty/Podminky.pdf
 - Dlaždice a data OpenStreetMap: © OpenStreetMap contributors, [Open Database License](https://www.openstreetmap.org/copyright). Dlaždice: https://operations.osmfoundation.org/policies/tiles/
 - Nominatim: https://operations.osmfoundation.org/policies/nominatim/
 - Směrování OSRM (FOSSGIS): https://routing.openstreetmap.de/about.html a záložní https://router.project-osrm.org

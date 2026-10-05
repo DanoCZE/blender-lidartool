@@ -84,6 +84,160 @@ def insert_driveline(context, output: Path) -> None:
     show_material(context)
 
 
+def insert_buildings(context, output: Path) -> None:
+    manifest_path = output / "buildings.json"
+    if not manifest_path.is_file():
+        raise ValueError("Budovy se nepodařilo uložit.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    items = manifest.get("buildings") or []
+    if not items:
+        raise ValueError("Z vybraných půdorysů nevznikla žádná budova.")
+    collection = _buildings_collection(context)
+    folder = (output / "buildings").resolve()
+    for item in items:
+        building_id = str(item.get("id") or "").strip()
+        if not building_id:
+            continue
+        path = (output / str(item.get("file") or "")).resolve()
+        try:
+            path.relative_to(folder)
+        except ValueError as exc:
+            raise ValueError("Soubor budovy je mimo výstup.") from exc
+        if not path.is_file():
+            raise ValueError("Soubor budovy chybí.")
+        data = np.load(path)
+        vertices = np.asarray(data["vertices"], dtype=np.float32)
+        faces = np.asarray(data["faces"], dtype=np.int32)
+        if len(vertices) < 3 or len(faces) == 0:
+            continue
+        _remove_building(building_id)
+        name = _building_name(str(item.get("name") or ""), building_id)
+        mesh = bpy.data.meshes.new(name)
+        mesh.vertices.add(len(vertices))
+        mesh.vertices.foreach_set("co", _floats(vertices))
+        mesh.loops.add(len(faces) * 3)
+        mesh.loops.foreach_set("vertex_index", _ints(faces))
+        mesh.polygons.add(len(faces))
+        mesh.polygons.foreach_set("loop_start", _ints(np.arange(0, len(faces) * 3, 3)))
+        mesh.polygons.foreach_set("loop_total", _ints(np.full(len(faces), 3)))
+        _apply_roof_texture(mesh, output, vertices, faces)
+        mesh.update(calc_edges=True)
+        mesh.validate()
+        _shade_building(mesh)
+        obj = bpy.data.objects.new(name, mesh)
+        obj["lidar_building_id"] = building_id
+        collection.objects.link(obj)
+        try:
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+        except RuntimeError:
+            pass
+
+
+def _apply_roof_texture(mesh, output: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
+    from blender_lidartool.engine.roofuv import project_roof_uv
+
+    wall = _building_material()
+    layers = _read_layers(output)
+    terrain_path = output / "mesh.npz"
+    if not layers or not terrain_path.is_file():
+        mesh.materials.append(wall)
+        return
+    terrain = np.load(terrain_path)
+    terrain_xy = np.asarray(terrain["vertices"], dtype=np.float64)[:, :2]
+    terrain_faces = np.asarray(terrain["faces"], dtype=np.int32)
+    face_slot = np.full(len(terrain_faces), -1, dtype=np.int32)
+    face_uv = np.zeros((len(terrain_faces), 3, 2), dtype=np.float32)
+    for slot, layer in enumerate(layers):
+        rows = np.asarray(layer["rows"], dtype=np.int32)
+        valid = (rows >= 0) & (rows < len(terrain_faces))
+        face_slot[rows[valid]] = slot
+        face_uv[rows[valid]] = np.asarray(layer["uv"], dtype=np.float32)[valid]
+    uv, slots = project_roof_uv(vertices, faces, terrain_xy, terrain_faces, face_uv, face_slot)
+    mesh.materials.append(wall)
+    materials = _terrain_layer_materials(layers)
+    for material in materials:
+        mesh.materials.append(material)
+    material_index = np.zeros(len(faces), dtype=np.int32)
+    textured = slots >= 0
+    material_index[textured] = slots[textured] + 1
+    mesh.polygons.foreach_set("material_index", _ints(material_index))
+    uv_layer = mesh.uv_layers.new(name="Ortofoto")
+    uv_layer.data.foreach_set("uv", _floats(uv))
+
+
+def _terrain_layer_materials(layers: list) -> list:
+    terrain = _find_terrain_object()
+    if terrain is not None and terrain.data is not None and len(terrain.data.materials) == len(layers):
+        materials = [slot.material for slot in terrain.material_slots]
+        if all(material is not None for material in materials):
+            return materials
+    return [_textured_material(layer) for layer in layers]
+
+
+def _shade_building(mesh) -> None:
+    """Střecha je spojitá, hrana mezi střechou a stěnou zůstane ostrá."""
+    import bmesh
+
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.normal_update()
+    for edge in bm.edges:
+        faces = edge.link_faces
+        if len(faces) < 2:
+            edge.smooth = False
+            continue
+        edge.smooth = faces[0].normal.dot(faces[1].normal) > 0.75
+    for face in bm.faces:
+        face.smooth = True
+    bm.to_mesh(mesh)
+    bm.free()
+
+
+def _buildings_collection(context):
+    collection = bpy.data.collections.get("Budovy")
+    if collection is None:
+        collection = bpy.data.collections.new("Budovy")
+    try:
+        context.scene.collection.children.link(collection)
+    except RuntimeError:
+        pass
+    return collection
+
+
+def _building_material():
+    material = bpy.data.materials.get("Budova")
+    if material is None:
+        material = bpy.data.materials.new("Budova")
+        material.use_nodes = True
+        _double_sided(material)
+        shader = material.node_tree.nodes.get("Principled BSDF")
+        if shader is not None:
+            socket = shader.inputs.get("Base Color") or shader.inputs[0]
+            socket.default_value = (0.72, 0.66, 0.58, 1.0)
+    return material
+
+
+def _building_name(name: str, building_id: str) -> str:
+    label = " ".join((name or "").split())
+    for char in '\\/:*?"<>|':
+        label = label.replace(char, " ")
+    label = " ".join(label.split())
+    if not label:
+        label = f"Budova {building_id}".strip()
+    return label[:63] or "Budova"
+
+
+def _remove_building(building_id: str) -> None:
+    for obj in list(bpy.data.objects):
+        if obj.get("lidar_building_id") != building_id:
+            continue
+        data = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if data is not None and data.users == 0 and isinstance(data, bpy.types.Mesh):
+            bpy.data.meshes.remove(data)
+
+
 def insert_reference(context, image_path: Path, placement: dict) -> None:
     _remove_object("Predloha")
     image = bpy.data.images.load(str(image_path), check_existing=True)

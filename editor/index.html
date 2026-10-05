@@ -18,6 +18,9 @@
         <button type="button" id="mode-reference" class="btn icon" title="Edit předlohy. G posune, R otočí, S mění měřítko. Levé tlačítko potvrdí, Esc zruší.">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1"/><path d="M4 16l4-4 3 3 2-2 5 4"/></svg>
         </button>
+        <button type="button" id="mode-buildings" class="btn icon" title="Výběr budov. Klik na půdorys ho vybere. Vložit budovy je přidá do Blenderu a editor nechá otevřený.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10l8-6 8 6v10"/><path d="M9 20v-6h6v6"/></svg>
+        </button>
       </div>
       <div class="bar-cluster">
         <button type="button" id="basemap-ortho" class="btn icon active" title="Podklad: ortofoto ČÚZK.">
@@ -25,6 +28,9 @@
         </button>
         <button type="button" id="basemap-osm" class="btn icon" title="Podklad: mapa OpenStreetMap.">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3l6 2v16l-6-2V3z"/><path d="M9 3L4 5v16l5-2M15 5l5-2v16l-5 2"/></svg>
+        </button>
+        <button type="button" id="visibility" class="btn icon" title="Viditelnost 400 m od tratě. Zeleně je to, co je vidět z výšky očí. Vybrané budovy se zapečou do DMR 5G a výhled zakryjí.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
         </button>
       </div>
       <div id="brush-menu">
@@ -135,6 +141,12 @@
           Sundat předlohu
         </button>
       </div>
+      <div id="panel-buildings" class="panel-body hidden">
+        <p class="hint">Přibližte mapu a klikněte na půdorysy. Výběr zůstane i po zavření editoru. Každá vybraná budova se vloží jako vlastní objekt.</p>
+        <p id="buildings-count">Vybrané budovy: 0</p>
+        <button type="button" id="buildings-insert" class="btn primary" disabled>Vložit budovy</button>
+        <button type="button" id="buildings-clear" class="btn">Zrušit výběr</button>
+      </div>
     </div>
   </aside>
   <div id="map"></div>
@@ -168,6 +180,8 @@
   <script src="js/history.js"></script>
   <script src="js/zones.js"></script>
   <script src="js/track-draw.js"></script>
+  <script src="js/buildings.js"></script>
+  <script src="js/visibility.js"></script>
   <script src="js/help.js"></script>
   <script src="js/track-api.js"></script>
   <script src="js/search.js"></script>
