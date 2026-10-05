@@ -6,10 +6,29 @@ import time
 from pathlib import Path
 
 
-def write_status(path: Path, pct: float, message: str, done: bool = False, error: str | None = None) -> None:
+_EVENTS: list[str] = []
+
+
+def write_status(
+    path: Path,
+    pct: float,
+    message: str,
+    done: bool = False,
+    error: str | None = None,
+    event: str | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if event:
+        _EVENTS.append(f"{time.strftime('%H:%M:%S')}  {event}")
+        del _EVENTS[:-300]
     text = json.dumps(
-        {"pct": float(pct), "message": message, "done": bool(done), "error": error},
+        {
+            "pct": float(pct),
+            "message": message,
+            "done": bool(done),
+            "error": error,
+            "events": list(_EVENTS),
+        },
         ensure_ascii=False,
     )
     temporary = path.with_suffix(".tmp")
@@ -49,8 +68,8 @@ def _write_track(path: Path, segments: list, message: str) -> str:
 
 
 def _progress(status: Path):
-    def inner(pct: float, message: str) -> None:
-        write_status(status, pct, message)
+    def inner(pct: float, message: str, event: str | None = None) -> None:
+        write_status(status, pct, message, event=event)
 
     return inner
 
@@ -178,8 +197,75 @@ def _original_ortho(zone: dict) -> Path | None:
     return None
 
 
+def _write_manifest(path: Path, manifest: dict) -> None:
+    zones = []
+    for zone in manifest.get("zones") or []:
+        zones.append({key: value for key, value in zone.items() if not str(key).startswith("_")})
+    path.write_text(json.dumps({"zones": zones}, ensure_ascii=False), encoding="utf-8")
+
+
+def _zone_label(zone: dict, scale: int) -> str:
+    zone_id = int(zone["id"])
+    part = int(zone.get("part") or 0)
+    parts = int(zone.get("parts") or 1)
+    if parts > 1:
+        return f"Zóna {zone_id} díl {part + 1}/{parts} · {scale}×"
+    return f"Zóna {zone_id} · {scale}×"
+
+
+def _upscale_zone(zone: dict, scale: int, tile: int, from_original: bool, upscale_x4, report) -> None:
+    from blender_lidartool.engine.upscale import TILE_OVERLAP, _image_size, upscale_png
+
+    original = _original_ortho(zone)
+    if from_original:
+        if original is None:
+            raise ValueError("Originál ortofota už není na disku. Položte ortofoto znovu, nebo zvolte upscalovanou verzi.")
+        path = original
+    else:
+        path = Path(zone["image"])
+    saved = Path(str(zone.get("_check_source") or ""))
+    if saved.is_file():
+        path = saved
+    if not path.is_file():
+        raise ValueError(f"Chybí ortofoto zóny {int(zone['id'])}.")
+    if not zone.get("_check_size"):
+        size = _image_size(path)
+        if size is None:
+            raise ValueError(f"Nejde přečíst rozměr ortofota zóny {int(zone['id'])}.")
+        zone["_check_size"] = [size[0], size[1]]
+    keep_source = original is not None and path.resolve() == original.resolve()
+    zone["_check_source"] = str(path)
+    zone["image"] = str(
+        upscale_png(
+            path,
+            scale,
+            tile,
+            TILE_OVERLAP,
+            upscale_x4,
+            keep_source=keep_source,
+            progress=report,
+            label=_zone_label(zone, scale),
+        )
+    )
+    if original is not None:
+        zone["original"] = str(original)
+
+
+def _zone_problem(zone: dict, scale: int, output: Path) -> str | None:
+    from blender_lidartool.engine.upscale import upscaled_problem
+
+    if scale <= 1:
+        return None
+    source = Path(str(zone.get("_check_source") or ""))
+    if not source.is_file():
+        source = _original_ortho(zone) or Path(str(zone.get("image") or ""))
+    raw = zone.get("_check_size")
+    source_size = (int(raw[0]), int(raw[1])) if raw else None
+    return upscaled_problem(Path(str(zone.get("image") or "")), source, scale, output, source_size)
+
+
 def cmd_upscale(args) -> str:
-    from blender_lidartool.engine.upscale import UPSCALE_SCALES, upscale_png
+    from blender_lidartool.engine.upscale import UPSCALE_SCALES
 
     cache, _segments, project = _load_request(Path(args.request))
     progress = _progress(Path(args.status))
@@ -201,7 +287,7 @@ def cmd_upscale(args) -> str:
     try:
         from blender_lidartool.engine.realesrgan_model import load_upscaler
 
-        progress(5, "Načítám Real-ESRGAN")
+        progress(5, "Načítám Real-ESRGAN", event="načítám Real-ESRGAN")
         upscale_x4 = load_upscaler(weights)
     except ModuleNotFoundError as exc:
         if "torch" not in str(exc).lower():
@@ -210,57 +296,76 @@ def cmd_upscale(args) -> str:
     changed = 0
     total = len(zones)
     for index, zone in enumerate(zones):
-        zone_id = int(zone["id"])
-        scale = scales.get(zone_id, 1)
-        start = 10 + 80 * index / total
-        end = 10 + 80 * (index + 1) / total
-        part = int(zone.get("part") or 0)
-        parts = int(zone.get("parts") or 1)
-        if parts > 1:
-            label = f"Zóna {zone_id} díl {part + 1}/{parts} · {scale}×"
-        else:
-            label = f"Zóna {zone_id} · {scale}×"
+        scale = scales.get(int(zone["id"]), 1)
+        start = 10 + 78 * index / total
+        end = 10 + 78 * (index + 1) / total
+        label = _zone_label(zone, scale)
         if scale == 1:
-            progress(end, f"{label} · zůstává 1×")
+            progress(end, f"{label} · zůstává 1×", event=f"{label} zůstává 1×")
             continue
-        original = _original_ortho(zone)
-        if from_original:
-            if original is None:
-                raise ValueError("Originál ortofota už není na disku. Položte ortofoto znovu, nebo zvolte upscalovanou verzi.")
-            path = original
-        else:
-            path = Path(zone["image"])
-        if not path.is_file():
-            raise ValueError(f"Chybí ortofoto zóny {zone_id}.")
-        keep_source = original is not None and path.resolve() == original.resolve()
 
-        def report(frac, message, start=start, end=end):
-            progress(start + (end - start) * frac, message)
+        def report(frac, message, event=None, start=start, end=end):
+            progress(start + (end - start) * frac, message, event=event)
 
-        progress(start, f"{label} · připravuji")
-        zone["image"] = str(
-            upscale_png(
-                path,
-                scale,
-                tile,
-                32,
-                upscale_x4,
-                keep_source=keep_source,
-                progress=report,
-                label=label,
-            )
-        )
-        if original is not None:
-            zone["original"] = str(original)
-        changed += 1
+        progress(start, f"{label} · připravuji", event=f"{label} začátek")
+        try:
+            _upscale_zone(zone, scale, tile, from_original, upscale_x4, report)
+            changed += 1
+        except Exception as exc:
+            progress(end, f"{label} · chyba, zkusím znovu po kontrole", event=f"{label} chyba: {exc}")
+            zone["_check_error"] = str(exc)
         try:
             import torch
 
             torch.cuda.empty_cache()
         except Exception:
             pass
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
-    progress(95, "Ortofoto je zvětšené")
+    _write_manifest(manifest_path, manifest)
+    pending = []
+    for zone in zones:
+        scale = scales.get(int(zone["id"]), 1)
+        if scale <= 1:
+            continue
+        reason = zone.pop("_check_error", None) or _zone_problem(zone, scale, output)
+        if reason:
+            pending.append((zone, reason))
+    redone = 0
+    if pending:
+        progress(90, f"Kontrola OUTPUT · chybí nebo nesedí {len(pending)}, generuji znovu", event=f"kontrola OUTPUT · chybí nebo nesedí {len(pending)}")
+        still = []
+        for index, (zone, reason) in enumerate(pending):
+            scale = scales.get(int(zone["id"]), 1)
+            label = _zone_label(zone, scale)
+            start = 90 + 8 * index / len(pending)
+            end = 90 + 8 * (index + 1) / len(pending)
+
+            def report(frac, message, event=None, start=start, end=end):
+                progress(start + (end - start) * frac, message, event=event)
+
+            progress(start, f"{label} · znovu, předtím: {reason}", event=f"{label} korekce znovu: {reason}")
+            try:
+                _upscale_zone(zone, scale, tile, from_original, upscale_x4, report)
+                redone += 1
+                again = _zone_problem(zone, scale, output)
+            except Exception as exc:
+                again = str(exc)
+            if again:
+                still.append(f"{label}: {again}")
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        _write_manifest(manifest_path, manifest)
+        if still:
+            raise ValueError("Ve složce OUTPUT se nepodařilo doplnit: " + "; ".join(still))
+    else:
+        progress(94, "Kontrola OUTPUT · soubory sedí", event="kontrola OUTPUT · soubory sedí")
+    _write_manifest(manifest_path, manifest)
+    progress(98, "Ortofoto je zvětšené")
+    if redone:
+        return f"Zvětšeno zón: {changed}. Znovu vygenerováno: {redone}."
     return f"Zvětšeno zón: {changed}."
 
 
@@ -362,9 +467,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         message = args.func(args)
     except Exception as exc:
-        write_status(status, 100, str(exc), done=True, error=str(exc))
+        write_status(status, 100, str(exc), done=True, error=str(exc), event=f"chyba: {exc}")
         return 1
-    write_status(status, 100, message, done=True)
+    write_status(status, 100, message, done=True, event=message)
     return 0
 
 

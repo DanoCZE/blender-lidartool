@@ -18,12 +18,77 @@ class GpuOutOfMemory(RuntimeError):
 
 
 UPSCALE_SCALES = (1, 2, 4, 8, 16)
+# Síť rozmazává zhruba 100 px originálu od okraje vstupu. 32 px z toho nechalo měkký pruh.
+TILE_OVERLAP = 96
 _RAM_OUTPUT = 400 * 1024 * 1024
 
 
 def output_size(width: int, height: int, scale: int) -> tuple[int, int]:
     _check_scale(scale)
     return width * scale, height * scale
+
+
+def upscaled_problem(
+    result: Path,
+    source: Path,
+    scale: int,
+    output_dir: Path,
+    source_size: tuple[int, int] | None = None,
+) -> str | None:
+    """None, když je ve složce OUTPUT celý soubor ve správném rozměru. Jinak důvod."""
+    if scale <= 1:
+        return None
+    if source_size is None and not source.is_file():
+        return "chybí originál"
+    if not result.is_file():
+        return "chybí soubor ve složce OUTPUT"
+    root = output_dir.resolve()
+    try:
+        resolved = result.resolve()
+    except OSError:
+        return "soubor nejde přečíst"
+    if resolved != root and root not in resolved.parents:
+        return "soubor není ve složce OUTPUT"
+    if not _image_complete(result):
+        return "soubor je nedopsaný"
+    if source_size is None:
+        source_size = _image_size(source)
+    actual = _image_size(result)
+    if source_size is None or actual is None:
+        return "nejde přečíst rozměr"
+    expected = output_size(source_size[0], source_size[1], scale)
+    if actual != expected:
+        return f"rozměr {actual[0]}×{actual[1]} místo {expected[0]}×{expected[1]}"
+    return None
+
+
+def _image_size(path: Path) -> tuple[int, int] | None:
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+    except (OSError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return int(width), int(height)
+
+
+def _image_complete(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size < 32:
+        return False
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - 32))
+        tail = handle.read()
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        return b"IEND" in tail
+    if suffix in {".jpg", ".jpeg"}:
+        return tail.rstrip(b"\x00\r\n ").endswith(b"\xff\xd9")
+    return False
 
 
 def upscale_array(
@@ -60,20 +125,20 @@ def upscale_png(
     image = np.asarray(Image.open(path).convert("RGB"))
     height, width = image.shape[:2]
     out_w, out_h = output_size(width, height, scale)
-    reporter.emit(0.0, f"načteno {width}×{height}, cíl {out_w}×{out_h}", force=True)
+    reporter.emit(0.0, f"načteno {width}×{height}, cíl {out_w}×{out_h}", force=True, event=f"načteno {width}×{height}, cíl {out_w}×{out_h}")
     result, scratch = _upscale_core(image, scale, tile, overlap, upscale_x4, reporter)
     del image
     dest = path if lossless else path.with_suffix(".jpg")
     kind = "PNG" if lossless else "JPEG"
     reporter.span(0.93, 1.0)
-    reporter.emit(0.0, f"ukládám {kind} {result.shape[1]}×{result.shape[0]}", force=True)
+    reporter.emit(0.0, f"ukládám {kind} {result.shape[1]}×{result.shape[0]}", force=True, event=f"ukládám {kind} {result.shape[1]}×{result.shape[0]}")
     try:
         _save_rgb(result, dest, lossless)
     finally:
         _release_scratch(result, scratch)
     if not keep_source and dest.resolve() != path.resolve() and path.exists():
         path.unlink()
-    reporter.emit(1.0, f"uloženo {dest.name}", force=True)
+    reporter.emit(1.0, f"uloženo {dest.name}", force=True, event=f"uloženo {dest.name}")
     return dest
 
 
@@ -153,7 +218,7 @@ def _upscale_x4_retry(
             return _upscale_x4_tiled(
                 image,
                 size,
-                min(overlap, size // 4),
+                min(overlap, size // 3),
                 upscale_x4,
                 shrink,
                 reporter,
@@ -166,7 +231,7 @@ def _upscale_x4_retry(
             size //= 2
             gc.collect()
             if reporter is not None:
-                reporter.emit(0.0, f"málo VRAM, zkouším dlaždici {size} px", force=True)
+                reporter.emit(0.0, f"málo VRAM, zkouším dlaždici {size} px", force=True, event=f"málo VRAM, zkouším dlaždici {size} px")
     raise RuntimeError("Grafika nemá dost paměti ani pro dlaždici 128 px. Zmenšete ji v panelu a zkuste znovu.") from last_error
 
 
@@ -183,7 +248,7 @@ def _upscale_x4_tiled(
 ):
     """Dlaždice dostane přesah jako kontext a ten se po modelu ořízne.
 
-    Okraj je měkčí, protože síť tam sahá mimo dlaždici. Ve výsledku zůstane jen střed.
+    U dlaždice 360 px je přesah 96 px. Menší přesah nechává rozmazaný pruh v obraze.
     Průměrování překryvu míchalo nejisté okraje a v pruzích obraz rozmývalo.
     """
     height, width = image.shape[:2]
@@ -203,6 +268,7 @@ def _upscale_x4_tiled(
             0.0,
             f"průchod {pass_index + 1}/{passes} {goal} · {_px(width, height)} → {_px(out_w, out_h)} · dlaždice 0/{total}",
             force=True,
+            event=f"průchod {pass_index + 1}/{passes} {goal} začátek · {_px(width, height)} → {_px(out_w, out_h)}",
         )
     for top in ys:
         bottom = min(height, top + inner)
@@ -221,6 +287,7 @@ def _upscale_x4_tiled(
                     0.9 * done / total,
                     f"průchod {pass_index + 1}/{passes} {goal} · {_px(width, height)} → {_px(out_w, out_h)} · dlaždice {done}/{total}{extras}",
                     force=done == total,
+                    event=f"průchod {pass_index + 1}/{passes} {goal} konec · dlaždice {done}/{total}" if done == total else None,
                 )
     _repair_soft_tiles(
         image,
@@ -256,73 +323,228 @@ def _scale_region(image, top, bottom, left, right, pad, upscale_x4, shrink):
     return scaled
 
 
-def _repair_context(tile: int, pad: int, inner: int) -> int:
-    """Větší okolí pro druhý průchod. Vejde se do 512 px, což je strop dlaždice."""
-    room = 512 - (inner + 2 * pad)
-    if room < 32:
-        return pad
-    return pad + min(room // 2, pad)
+def _lanczos_up(source: np.ndarray, factor: int) -> np.ndarray:
+    image = Image.fromarray(np.ascontiguousarray(source), "RGB")
+    resized = image.resize((source.shape[1] * factor, source.shape[0] * factor), Image.Resampling.LANCZOS)
+    return np.asarray(resized)
 
 
-def _repair_soft_tiles(image, output, ys, xs, inner, pad, tile, upscale_x4, shrink, factor, reporter):
-    """Dlaždice měkčí než originál se vykreslí znovu a nahradí, jen když je ostřejší."""
+def _repair_soft_tiles(image, output, ys, xs, inner, _pad, tile, upscale_x4, shrink, factor, reporter):
+    """Měkký pruh dlaždice vykreslí znovu uprostřed okna, kde model nerozmazává okraj."""
     height, width = image.shape[:2]
-    soft = []
+    jobs = []
     for top in ys:
         bottom = min(height, top + inner)
         for left in xs:
             right = min(width, left + inner)
-            if bottom - top < 8 or right - left < 8:
+            if bottom - top < 16 or right - left < 16:
                 continue
             source = image[top:bottom, left:right]
             current = output[top * factor : bottom * factor, left * factor : right * factor]
-            if _lost_detail(source, current, factor):
-                soft.append((top, bottom, left, right))
+            boxes = _soft_boxes(source, current, factor)
+            if boxes:
+                jobs.append((top, bottom, left, right, boxes))
     if reporter is not None:
-        reporter.emit(0.9, f"kontrola ostrosti · měkké dlaždice {len(soft)}", force=True)
-    if not soft:
+        reporter.emit(
+            0.9,
+            f"kontrola ostrosti · měkké dlaždice {len(jobs)}",
+            force=True,
+            event=f"kontrola ostrosti · měkké dlaždice {len(jobs)}",
+        )
+    if not jobs:
         return 0
-    context = _repair_context(tile, pad, inner)
-    if context <= pad:
-        if reporter is not None:
-            reporter.emit(1.0, "kontrola ostrosti · větší okolí se nevejde, dlaždice nechávám", force=True)
-        return 0
-    allow_bigger = True
-    fixed = 0
-    for index, (top, bottom, left, right) in enumerate(soft, start=1):
-        source = image[top:bottom, left:right]
-        y0 = top * factor
-        x0 = left * factor
-        y1 = bottom * factor
-        x1 = right * factor
-        current = np.array(output[y0:y1, x0:x1])
-        keep_old = _detail_keep(source, current, factor)
-        chosen = None
-        if allow_bigger:
-            try:
-                chosen = _scale_region(image, top, bottom, left, right, context, upscale_x4, shrink)
-            except GpuOutOfMemory:
-                allow_bigger = False
+    span = max(128, min(512, int(tile)))
+    piece_limit = max(32, span - 256)
+    allow_gpu = True
+    ai_fixed = 0
+    origin_fixed = 0
+    for index, (top, bottom, left, right, boxes) in enumerate(jobs, start=1):
+        for box in boxes:
+            for rel_top, rel_bottom, rel_left, rel_right in _split_box(*box, piece_limit):
+                src_top = top + rel_top
+                src_bottom = top + rel_bottom
+                src_left = left + rel_left
+                src_right = left + rel_right
+                y0, y1 = src_top * factor, src_bottom * factor
+                x0, x1 = src_left * factor, src_right * factor
+                current = np.array(output[y0:y1, x0:x1])
+                source = image[src_top:src_bottom, src_left:src_right]
+                old_sharp = _sharpness(current)
                 chosen = None
-                gc.collect()
-                if reporter is not None:
-                    reporter.emit(0.9, "na větší okolí není paměť, další měkké dlaždice nechávám", force=True)
-        if chosen is not None and chosen.shape != current.shape:
-            chosen = None
-        keep_new = _detail_keep(source, chosen, factor) if chosen is not None else 0.0
-        if chosen is not None and (keep_new < keep_old * 1.15 or keep_new < keep_old + 0.12):
-            chosen = None
-        if chosen is not None:
-            output[y0:y1, x0:x1] = chosen
-            fixed += 1
-        del chosen, current
+                rendered = None
+                if allow_gpu:
+                    try:
+                        rendered = _render_centered(
+                            image, src_top, src_bottom, src_left, src_right, span, upscale_x4, shrink, factor
+                        )
+                    except GpuOutOfMemory:
+                        allow_gpu = False
+                        rendered = None
+                        gc.collect()
+                        if reporter is not None:
+                            reporter.emit(
+                                0.9,
+                                "na korekci není paměť, další beru z originálu",
+                                force=True,
+                                event="korekce ostrosti · na korekci není paměť",
+                            )
+                if rendered is not None and _sharpness(rendered) >= old_sharp * 1.2:
+                    chosen = rendered
+                    ai_fixed += 1
+                else:
+                    origin = _lanczos_up(source, factor)
+                    if origin.shape == current.shape and _sharpness(origin) >= old_sharp * 1.2:
+                        chosen = origin
+                        origin_fixed += 1
+                if chosen is not None:
+                    output[y0:y1, x0:x1] = chosen
+                del chosen, current, rendered
         if reporter is not None:
+            last = index == len(jobs)
             reporter.emit(
-                0.9 + 0.1 * index / len(soft),
-                f"kontrola ostrosti · přerender {index}/{len(soft)} · opraveno {fixed}",
-                force=index == len(soft),
+                0.9 + 0.1 * index / len(jobs),
+                f"korekce ostrosti · ostřejší průchod {ai_fixed}, z originálu {origin_fixed}" if last else f"korekce ostrosti · dlaždice {index}/{len(jobs)}",
+                force=last,
+                event=f"korekce ostrosti · měkké {len(jobs)}, ostřejší průchod {ai_fixed}, z originálu {origin_fixed}" if last else None,
             )
-    return fixed
+    return ai_fixed + origin_fixed
+
+
+def _soft_boxes(source: np.ndarray, scaled: np.ndarray, factor: int) -> list[tuple[int, int, int, int]]:
+    """Čtvrtiny, ve kterých plné rozlišení ztratilo ostrost originálu.
+
+    Průměr celé dlaždice takový pruh schová, protože zbytek zůstane ostrý.
+    """
+    height, width = source.shape[:2]
+    boxes: list[tuple[int, int, int, int]] = []
+    if _lost_detail(source, scaled, factor):
+        boxes.append((0, height, 0, width))
+    else:
+        for top, bottom in _quarters(height):
+            part = scaled[top * factor : bottom * factor]
+            if _washed(source[top:bottom], part):
+                boxes.append((top, bottom, 0, width))
+        for left, right in _quarters(width):
+            part = scaled[:, left * factor : right * factor]
+            if _washed(source[:, left:right], part):
+                boxes.append((0, height, left, right))
+    if len(boxes) == 1 and boxes[0] == (0, height, 0, width):
+        return boxes
+    return _merge_bands(boxes, height, width)
+
+
+def _washed(source: np.ndarray, scaled: np.ndarray) -> bool:
+    if source.shape[0] < 8 or source.shape[1] < 8:
+        return False
+    source_sharp = _sharpness(source)
+    if source_sharp < 4.0:
+        return False
+    return _sharpness(scaled) < 0.55 * source_sharp
+
+
+def _quarters(length: int) -> list[tuple[int, int]]:
+    if length < 32:
+        return [(0, length)]
+    return [(index * length // 4, (index + 1) * length // 4) for index in range(4)]
+
+
+def _merge_bands(boxes, height: int, width: int) -> list[tuple[int, int, int, int]]:
+    rows = [box for box in boxes if box[2] == 0 and box[3] == width]
+    cols = [box for box in boxes if box[0] == 0 and box[1] == height]
+    return _merge_touching(rows, along_x=False) + _merge_touching(cols, along_x=True)
+
+
+def _merge_touching(boxes, along_x: bool) -> list[tuple[int, int, int, int]]:
+    ordered = sorted(boxes, key=(lambda box: box[2]) if along_x else (lambda box: box[0]))
+    merged: list[tuple[int, int, int, int]] = []
+    for top, bottom, left, right in ordered:
+        if not merged:
+            merged.append((top, bottom, left, right))
+            continue
+        prev_top, prev_bottom, prev_left, prev_right = merged[-1]
+        touches = prev_right == left if along_x else prev_bottom == top
+        aligned = (prev_top, prev_bottom) == (top, bottom) if along_x else (prev_left, prev_right) == (left, right)
+        if touches and aligned:
+            merged[-1] = (prev_top, bottom, prev_left, right) if not along_x else (prev_top, prev_bottom, prev_left, right)
+        else:
+            merged.append((top, bottom, left, right))
+    return merged
+
+
+def _split_box(top: int, bottom: int, left: int, right: int, limit: int) -> list[tuple[int, int, int, int]]:
+    pieces = []
+    y = top
+    while y < bottom:
+        y2 = min(bottom, y + limit)
+        x = left
+        while x < right:
+            x2 = min(right, x + limit)
+            pieces.append((y, y2, x, x2))
+            x = x2
+        y = y2
+    return pieces
+
+
+def _render_centered(image, top, bottom, left, right, span, upscale_x4, shrink, factor):
+    """Okno stejné velikosti jako hlavní dlaždice, měkký výřez v jeho středu."""
+    span = int(span)
+    y0 = int(round((top + bottom) / 2 - span / 2))
+    x0 = int(round((left + right) / 2 - span / 2))
+    crop = _window(image, y0, x0, span)
+    scaled = np.asarray(upscale_x4(crop))
+    rel_top = top - y0
+    rel_left = left - x0
+    piece = scaled[rel_top * 4 : (rel_top + (bottom - top)) * 4, rel_left * 4 : (rel_left + (right - left)) * 4]
+    if shrink:
+        piece = downsample_half(piece)
+    elif piece.dtype != np.uint8:
+        piece = np.clip(np.rint(piece), 0, 255).astype(np.uint8)
+    expected = ((bottom - top) * factor, (right - left) * factor, 3)
+    if piece.shape != expected:
+        return None
+    return np.ascontiguousarray(piece)
+
+
+def _pad_to_window(crop: np.ndarray, above: int, below: int, before: int, after: int) -> np.ndarray:
+    """Reflect umí doplnit jen méně, než je samotný výřez. Zbytek dorovná okrajem."""
+    pad_y = (max(0, above), max(0, below))
+    pad_x = (max(0, before), max(0, after))
+    while pad_y[0] or pad_y[1] or pad_x[0] or pad_x[1]:
+        take_y = (min(pad_y[0], max(0, crop.shape[0] - 1)), min(pad_y[1], max(0, crop.shape[0] - 1)))
+        take_x = (min(pad_x[0], max(0, crop.shape[1] - 1)), min(pad_x[1], max(0, crop.shape[1] - 1)))
+        if take_y == (0, 0) and take_x == (0, 0):
+            return np.pad(crop, (pad_y, pad_x, (0, 0)), mode="edge")
+        crop = np.pad(crop, (take_y, take_x, (0, 0)), mode="reflect")
+        pad_y = (pad_y[0] - take_y[0], pad_y[1] - take_y[1])
+        pad_x = (pad_x[0] - take_x[0], pad_x[1] - take_x[1])
+    return crop
+
+
+def _window(image: np.ndarray, y0: int, x0: int, span: int) -> np.ndarray:
+    height, width = image.shape[:2]
+    y1 = y0 + span
+    x1 = x0 + span
+    src_y0 = max(0, y0)
+    src_y1 = min(height, y1)
+    src_x0 = max(0, x0)
+    src_x1 = min(width, x1)
+    crop = image[src_y0:src_y1, src_x0:src_x1]
+    if crop.size == 0:
+        crop = image[:1, :1]
+    above = src_y0 - y0
+    below = y1 - src_y1
+    before = src_x0 - x0
+    after = x1 - src_x1
+    if above or below or before or after:
+        crop = _pad_to_window(crop, above, below, before, after)
+    if crop.shape[0] != span or crop.shape[1] != span:
+        crop = np.pad(
+            crop,
+            ((0, max(0, span - crop.shape[0])), (0, max(0, span - crop.shape[1])), (0, 0)),
+            mode="edge",
+        )
+        crop = crop[:span, :span]
+    return np.ascontiguousarray(crop)
 
 
 def _lost_detail(source: np.ndarray, scaled: np.ndarray, factor: int) -> bool:
@@ -366,26 +588,16 @@ def _box_down(image: np.ndarray, factor: int) -> np.ndarray:
     return cropped.reshape(height // factor, factor, width // factor, factor, channels).mean(axis=(1, 3))
 
 
-def _edge_pad(tile: int) -> int:
-    """Kolik pixelů z každé strany zahodit, aby ve výsledku nezůstal měkký okraj.
-
-    U dlaždice 360 px je to 120 px. Menší přesah nechával pruhy, ve kterých
-    je ostrost zhruba o pětinu nižší než uprostřed.
-    """
-    tile = int(tile)
-    if tile <= 1:
-        return 0
-    return max(16, min(tile // 3, (tile - 32) // 2))
-
-
 def _useful_tile(height: int, width: int, tile: int, overlap: int) -> tuple[int, int]:
-    """Přesah je kontext uvnitř dlaždice, ne pixely navíc pro grafiku."""
+    """Přesah je kontext uvnitř dlaždice, ne pixely navíc pro grafiku.
+
+    U dlaždice 360 px a přesahu 96 px se z každé strany zahodí 96 px.
+    """
     tile = max(1, int(tile))
     limit = min(height, width) - 1
     if limit <= 0 or tile <= 1:
         return 0, tile
-    wanted = max(int(overlap), _edge_pad(tile))
-    pad = max(0, min(wanted, (tile - 1) // 2, limit))
+    pad = max(0, min(int(overlap), tile // 3, limit, (tile - 1) // 2))
     return pad, max(1, tile - 2 * pad)
 
 
@@ -490,15 +702,22 @@ class _Reporter:
         self.span1 = end
         self.last = 0.0
 
-    def emit(self, local: float, message: str, *, force: bool = False) -> None:
+    def emit(self, local: float, message: str, *, force: bool = False, event: str | None = None) -> None:
         if self.callback is None:
             return
         now = time.monotonic()
-        if not force and now - self.last < 0.3 and local < 0.999:
+        if not force and event is None and now - self.last < 0.3 and local < 0.999:
             return
         self.last = now
         frac = self.span0 + (self.span1 - self.span0) * min(1.0, max(0.0, local))
         text = f"{self.label} · {message}" if self.label else message
+        logged = f"{self.label} · {event}" if event and self.label else event
+        if logged:
+            try:
+                self.callback(frac, text, logged)
+                return
+            except TypeError:
+                pass
         self.callback(frac, text)
 
 

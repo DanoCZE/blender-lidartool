@@ -2,6 +2,7 @@ import json
 import math
 import shutil
 import threading
+import time
 from pathlib import Path
 
 import bpy
@@ -269,6 +270,50 @@ def _log_tail(path: Path) -> str:
     return text[-500:]
 
 
+def _log_text(scene):
+    name = "Log stavu"
+    block = bpy.data.texts.get(name)
+    if block is None:
+        block = bpy.data.texts.new(name)
+    body = (scene.lidar_log or "").strip() or "Zatím žádný záznam."
+    block.clear()
+    block.write(body)
+    if block.lines:
+        block.current_line_index = len(block.lines) - 1
+    return block
+
+
+def _show_log_space(space, text) -> None:
+    space.text = text
+    space.show_word_wrap = True
+    space.show_line_numbers = True
+    space.show_syntax_highlight = False
+
+
+def _append_log(scene, text: str) -> None:
+    line = f"{time.strftime('%H:%M:%S')}  {text}"
+    lines = [part for part in (scene.lidar_log or "").splitlines() if part]
+    if lines and lines[-1] == line:
+        return
+    lines.append(line)
+    scene.lidar_log = "\n".join(lines[-300:])
+
+
+def _sync_log(scene, status: dict, job) -> None:
+    events = status.get("events") or []
+    seen = int(getattr(job, "_event_count", 0) or 0)
+    if seen > len(events):
+        seen = 0
+    fresh = [part for part in events[seen:] if part]
+    if not fresh:
+        job._event_count = len(events)
+        return
+    lines = [part for part in (scene.lidar_log or "").splitlines() if part]
+    lines.extend(fresh)
+    scene.lidar_log = "\n".join(lines[-300:])
+    job._event_count = len(events)
+
+
 def _read_status(path: Path):
     if not path.exists():
         return None
@@ -298,7 +343,9 @@ class _Job:
             return {"CANCELLED"}
         _BUSY = True
         _attach(context, self)
+        self._event_count = 0
         context.scene.lidar_status = "Spouštím úlohu"
+        _append_log(context.scene, f"{self.bl_label} spuštěn")
         window = context.window or context.window_manager.windows[0]
         self._timer = context.window_manager.event_timer_add(0.4, window=window)
         context.window_manager.modal_handler_add(self)
@@ -311,11 +358,13 @@ class _Job:
         if getattr(self, "_cancel_requested", False):
             self.cancel(context)
             context.scene.lidar_status = "Zrušeno."
+            _append_log(context.scene, "Zrušeno")
             _redraw(context)
             return {"CANCELLED"}
         status = _read_status(self._status_path)
         if status:
             context.scene.lidar_status = f"{int(status['pct'])} % {status['message']}"
+            _sync_log(context.scene, status, self)
             _redraw(context)
         if self._proc.poll() is None:
             return {"RUNNING_MODAL"}
@@ -324,9 +373,13 @@ class _Job:
         _detach(context, self)
         runtime.watch_process(None)
         status = _read_status(self._status_path) or status
+        if status:
+            _sync_log(context.scene, status, self)
         if self._proc.returncode != 0:
             message = (status or {}).get("error") or _log_tail(self._log_path) or "Úloha selhala."
             context.scene.lidar_status = message
+            if not (context.scene.lidar_log or "").rstrip().endswith(message):
+                _append_log(context.scene, message)
             self.report({"ERROR"}, message)
             _redraw(context)
             return {"CANCELLED"}
@@ -948,6 +1001,33 @@ class LIDAR_OT_prepare(bpy.types.Operator):
             context.window_manager.event_timer_remove(self._timer)
 
 
+class LIDAR_OT_show_log(bpy.types.Operator):
+    bl_idname = "lidar.show_log"
+    bl_label = "Log stavu"
+    bl_description = "Otevře log stavu v novém okně"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        text = _log_text(context.scene)
+        for window in context.window_manager.windows:
+            screen = window.screen
+            if screen is None:
+                continue
+            for area in screen.areas:
+                if area.type != "TEXT_EDITOR":
+                    continue
+                space = area.spaces.active
+                if getattr(space, "text", None) == text:
+                    _show_log_space(space, text)
+                    return {"FINISHED"}
+        bpy.ops.screen.area_dupli("INVOKE_DEFAULT")
+        window = context.window_manager.windows[-1]
+        area = window.screen.areas[0]
+        area.type = "TEXT_EDITOR"
+        _show_log_space(area.spaces.active, text)
+        return {"FINISHED"}
+
+
 class LIDAR_OT_cancel(bpy.types.Operator):
     bl_idname = "lidar.cancel_job"
     bl_label = "Zrušit"
@@ -1008,11 +1088,14 @@ class LIDAR_PT_terrain(bpy.types.Panel):
             box.label(text="AI model ve zvolené složce chybí.")
         else:
             box.label(text="AI model není nainstalovaný.")
-        box.prop(scene_data, "lidar_ai_dir")
-        box.operator("lidar.install_ai", text="Přeinstalovat AI model" if runtime.ai_ready() else "Nainstalovat AI model")
-        remove = box.row()
-        remove.enabled = runtime.ai_present()
-        remove.operator("lidar.uninstall_ai", text="Odinstalovat AI model")
+        ai_row = box.split(factor=0.5, align=True)
+        ai_row.prop(scene_data, "lidar_ai_dir")
+        if runtime.ai_present():
+            actions = ai_row.split(factor=0.5, align=True)
+            actions.operator("lidar.uninstall_ai", text="Odinstalovat")
+            actions.operator("lidar.install_ai", text="Přeinstalovat")
+        else:
+            ai_row.operator("lidar.install_ai", text="Nainstalovat")
         box.prop(scene_data, "lidar_upscale_source")
         for index in range(1, 5):
             box.prop(scene_data, f"lidar_upscale_{index}")
@@ -1032,19 +1115,22 @@ class LIDAR_PT_terrain(bpy.types.Panel):
         layout.operator("lidar.redownload_ortho", icon="FILE_REFRESH")
         layout.operator("lidar.upscale", icon="IMAGE_DATA")
         layout.operator("lidar.driveline", icon="CURVE_PATH")
-        status_row = layout.row(align=True)
-        status_col = status_row.column(align=True)
+        status_split = layout.split(factor=0.82 if scene_data.lidar_busy else 0.92, align=True)
+        status_col = status_split.column(align=True)
         chunks = [part for part in scene_data.lidar_status.split(" · ") if part]
         if len(chunks) >= 3:
             status_col.label(text=" · ".join(chunks[:2]))
             status_col.label(text=" · ".join(chunks[2:]))
         else:
             status_col.label(text=scene_data.lidar_status)
+        buttons = status_split.row(align=True)
+        buttons.operator("lidar.show_log", text="", icon="TEXT")
         if scene_data.lidar_busy:
-            status_row.operator("lidar.cancel_job", text="", icon="X")
+            buttons.operator("lidar.cancel_job", text="", icon="X")
 
 
 CLASSES = (
+    LIDAR_OT_show_log,
     LIDAR_OT_cancel,
     LIDAR_OT_prepare,
     LIDAR_OT_install_ai,
@@ -1086,6 +1172,7 @@ SCENE_PROPS = (
     ("lidar_points", bpy.props.IntProperty(name="Body", default=0)),
     ("lidar_length", bpy.props.FloatProperty(name="Délka", default=0.0)),
     ("lidar_status", bpy.props.StringProperty(name="Stav", default="Připraveno")),
+    ("lidar_log", bpy.props.StringProperty(name="Log stavu", default="")),
     ("lidar_busy", bpy.props.BoolProperty(name="Běží", default=False)),
     ("lidar_rally", bpy.props.StringProperty(name="Rally-Maps URL")),
     ("lidar_profile", bpy.props.EnumProperty(
@@ -1148,7 +1235,7 @@ SCENE_PROPS = (
         default=384,
         min=128,
         max=512,
-        description="Větší dlaždice je rychlejší, ale potřebuje víc VRAM. 384 je pro 8 GB grafiku. Z dlaždice se použije jen ostřejší střed, měkký okraj se zahodí",
+        description="Větší dlaždice je rychlejší, ale potřebuje víc VRAM. 384 je pro 8 GB grafiku. Přesah okraje je 96 px",
     )),
     ("lidar_drive_step", bpy.props.FloatProperty(name="Krok osy", default=5.0, min=1.0, unit="LENGTH")),
     ("lidar_osrm", bpy.props.StringProperty(name="OSRM URL", default="https://router.project-osrm.org")),
