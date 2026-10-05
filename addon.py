@@ -8,7 +8,7 @@ from pathlib import Path
 import bpy
 
 from . import editor_server, runtime, scene
-from .engine.upscale_usage import estimate_upscale_usage, jobs_from_manifest
+from .engine.upscale_usage import estimate_upscale_usage, jobs_from_manifest, tile_for_gpu
 
 _BUSY = False
 _OPERATORS: list = []
@@ -62,7 +62,7 @@ def _project(scene) -> dict:
         "snap_profile": scene.lidar_profile,
         "osrm_url": scene.lidar_osrm.strip() or "https://router.project-osrm.org",
         "upscale": {str(index): int(getattr(scene, f"lidar_upscale_{index}")) for index in range(1, 5)},
-        "upscale_tile": int(scene.lidar_upscale_tile),
+        "upscale_tile": tile_for_gpu(scene.lidar_gpu),
         "upscale_from": scene.lidar_upscale_source,
         "weights": str(runtime.weights_path()),
     }
@@ -279,7 +279,7 @@ def _upscale_usage(context, scene_data) -> dict:
         jobs = jobs_from_manifest(folder, scales, source=scene_data.lidar_upscale_source)
     except Exception:
         jobs = []
-    return estimate_upscale_usage(int(scene_data.lidar_upscale_tile), jobs)
+    return estimate_upscale_usage(tile_for_gpu(scene_data.lidar_gpu), jobs)
 
 
 def _apply_zones(context, zones, terrain_buffer_m, brushes=None, corridor_m=None) -> None:
@@ -1082,6 +1082,62 @@ class LIDAR_OT_upscale(_Job, bpy.types.Operator):
         self.report({"INFO"}, "Ortofoto je zvětšené.")
 
 
+class LIDAR_OT_roof_ortho(bpy.types.Operator):
+    bl_idname = "lidar.roof_ortho"
+    bl_label = "Doplnit střechy z ortofota"
+    bl_description = "Položí na střechy budov ortofoto terénu. Když je zvětšené, použije se ta verze"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        if context.scene.lidar_busy:
+            self.report({"WARNING"}, "Počkejte, než doběhne aktuální úloha.")
+            return {"CANCELLED"}
+        output = _terrain_output(context)
+        if output is None:
+            self.report({"ERROR"}, "Nejdřív vložte terén a položte na něj ortofoto.")
+            return {"CANCELLED"}
+        try:
+            painted, missed = scene.apply_building_roofs(context, output)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        message = f"Střechy z ortofota jsou na {painted} budovách."
+        if missed:
+            message += f" Mimo terén: {missed}."
+        context.scene.lidar_status = message
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class LIDAR_OT_facade(_Job, bpy.types.Operator):
+    bl_idname = "lidar.facade"
+    bl_label = "Fasáda budov"
+    bl_description = "Vyšší vybrané budovy dostanou omítku nebo cihlu, nižší plech. Každá barva je jiná a původní materiál se sundá. Střecha zůstane ortofoto"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        tall, low = scene.facade_targets(context)
+        if not tall and not low:
+            self.report({"ERROR"}, "Nejdřív vložte budovy.")
+            return {"CANCELLED"}
+        count = max(1, int(context.scene.lidar_facade_count))
+        request = _write_request(
+            context,
+            {
+                "facade_style": context.scene.lidar_facade_style,
+                "facade_count": min(count, len(tall)) if tall else 0,
+                "metal_count": min(count, len(low)) if low else 0,
+                "facade_seed": time.time_ns() % 2_000_000_000,
+            },
+        )
+        cache = _cache(context)
+        return self._begin(context, ["--status", str(cache / "TEMP" / "status.json"), "facade", "--request", str(request)])
+
+    def _apply(self, context):
+        houses, sheds = scene.apply_facade(context, self._output)
+        self.report({"INFO"}, f"Fasáda je na {houses} budovách, plech na {sheds}.")
+
+
 class LIDAR_OT_driveline(_Job, bpy.types.Operator):
     bl_idname = "lidar.driveline"
     bl_label = "Osa jako křivka"
@@ -1423,11 +1479,11 @@ class LIDAR_PT_terrain(bpy.types.Panel):
         for index in range(1, 5):
             box.prop(scene_data, f"lidar_upscale_{index}")
         split = box.split(factor=0.48)
-        split.prop(scene_data, "lidar_upscale_tile")
+        split.prop(scene_data, "lidar_gpu")
         usage = _upscale_usage(context, scene_data)
         info = split.column(align=True)
         info.label(text=usage["gpu_line"])
-        info.label(text=usage["hint_line"])
+        info.label(text=f"dlaždice {tile_for_gpu(scene_data.lidar_gpu)} px")
         if usage.get("size_line"):
             box.label(text=usage["size_line"])
         box.label(text=usage["ram_line"])
@@ -1437,6 +1493,11 @@ class LIDAR_PT_terrain(bpy.types.Panel):
         layout.operator("lidar.texture", icon="TEXTURE")
         layout.operator("lidar.redownload_ortho", icon="FILE_REFRESH")
         layout.operator("lidar.upscale", icon="IMAGE_DATA")
+        layout.operator("lidar.roof_ortho", icon="UV")
+        facade = layout.row(align=True)
+        facade.prop(scene_data, "lidar_facade_style", text="")
+        facade.prop(scene_data, "lidar_facade_count", text="Variant")
+        facade.operator("lidar.facade", icon="MATERIAL")
         layout.operator("lidar.driveline", icon="CURVE_PATH")
         status_split = layout.split(factor=0.82 if scene_data.lidar_busy else 0.92, align=True)
         status_col = status_split.column(align=True)
@@ -1470,6 +1531,8 @@ CLASSES = (
     LIDAR_OT_texture,
     LIDAR_OT_redownload_ortho,
     LIDAR_OT_upscale,
+    LIDAR_OT_roof_ortho,
+    LIDAR_OT_facade,
     LIDAR_OT_driveline,
     LIDAR_PT_terrain,
 )
@@ -1554,14 +1617,41 @@ SCENE_PROPS = (
     ("lidar_upscale_2", bpy.props.EnumProperty(name="Zóna 2", items=(("1", "1×", ""), ("2", "2×", ""), ("4", "4×", ""), ("8", "8×", ""), ("16", "16×", "")), default="4")),
     ("lidar_upscale_3", bpy.props.EnumProperty(name="Zóna 3", items=(("1", "1×", ""), ("2", "2×", ""), ("4", "4×", ""), ("8", "8×", ""), ("16", "16×", "")), default="2")),
     ("lidar_upscale_4", bpy.props.EnumProperty(name="Zóna 4", items=(("1", "1×", ""), ("2", "2×", ""), ("4", "4×", ""), ("8", "8×", ""), ("16", "16×", "")), default="1")),
+    ("lidar_gpu", bpy.props.EnumProperty(
+        name="Grafika",
+        items=(
+            ("4", "4 GB", "Nízká karta. Menší dlaždice, vejde se do 4 GB"),
+            ("6", "6 GB", "Menší dlaždice pro 6 GB"),
+            ("8", "8 GB", "Výchozí. Dlaždice 384 px pro 8 GB"),
+            ("12", "12 GB", "Větší dlaždice, rychlejší na 12 GB"),
+            ("16", "16 GB", "Největší dlaždice pro 16 GB a víc"),
+        ),
+        default="8",
+        description="Kolik paměti má grafika. Podle toho se zvolí dlaždice upscale. 8 GB je výchozí. Když paměť dojde, dlaždice se sama zmenší",
+    )),
     ("lidar_upscale_tile", bpy.props.IntProperty(
         name="Dlaždice",
         default=384,
         min=128,
         max=512,
-        description="Větší dlaždice je rychlejší, ale potřebuje víc VRAM. 384 je pro 8 GB grafiku. Přesah okraje je 96 px",
+        description="Starší ruční dlaždice. Upscale teď bere velikost z volby Grafika",
     )),
     ("lidar_drive_step", bpy.props.FloatProperty(name="Krok osy", default=5.0, min=1.0, unit="LENGTH")),
+    ("lidar_facade_style", bpy.props.EnumProperty(
+        name="Fasáda",
+        items=(
+            ("plaster", "Omítka", "Hladká omítka s okny"),
+            ("brick", "Cihla", "Cihelná zeď s okny"),
+        ),
+        default="plaster",
+    )),
+    ("lidar_facade_count", bpy.props.IntProperty(
+        name="Variant fasády",
+        default=5,
+        min=1,
+        max=16,
+        description="Kolik různých barev omítky, cihly nebo plechu se vygeneruje. Blízké budovy dostanou jinou",
+    )),
     ("lidar_osrm", bpy.props.StringProperty(name="OSRM URL", default="https://router.project-osrm.org")),
 )
 
@@ -1571,6 +1661,7 @@ def register():
         bpy.utils.register_class(cls)
     for name, prop in SCENE_PROPS:
         setattr(bpy.types.Scene, name, prop)
+    bpy.app.timers.register(scene.orient_existing_buildings, first_interval=0.2)
 
 
 def unregister():

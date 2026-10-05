@@ -181,6 +181,22 @@ def cmd_visibility(args) -> str:
     )
 
 
+def cmd_facade(args) -> str:
+    from blender_lidartool.engine.facade import generate_facades
+
+    request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+    project = request.get("project") or {}
+    progress = _progress(Path(args.status))
+    return generate_facades(
+        Path(request["cache"]) / "OUTPUT",
+        int(project.get("facade_count") or 0),
+        int(project.get("metal_count") or 0),
+        str(project.get("facade_style") or "plaster"),
+        int(project.get("facade_seed") or 1),
+        progress,
+    )
+
+
 def cmd_buildings(args) -> str:
     from blender_lidartool.engine.buildings import build_buildings
 
@@ -488,6 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("driveline", cmd_driveline),
         ("upscale", cmd_upscale),
         ("buildings", cmd_buildings),
+        ("facade", cmd_facade),
         ("visibility", cmd_visibility),
     ):
         command = commands.add_parser(name)

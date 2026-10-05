@@ -298,8 +298,8 @@ def _wall_faces(boundary_count: int, roof_count: int) -> np.ndarray:
         nxt = (index + 1) % boundary_count
         ground_index = roof_count + index
         ground_next = roof_count + nxt
-        faces.append((index, nxt, ground_next))
-        faces.append((index, ground_next, ground_index))
+        faces.append((index, ground_next, nxt))
+        faces.append((index, ground_index, ground_next))
     return np.asarray(faces, dtype=np.int32)
 
 

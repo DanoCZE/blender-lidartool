@@ -10,6 +10,14 @@ _BAND_BUDGET = 512 * 1024 * 1024
 _RAM_OUTPUT = 400 * 1024 * 1024
 
 
+GPU_TILES = {"4": 192, "6": 256, "8": 384, "12": 448, "16": 512}
+
+
+def tile_for_gpu(preset: str) -> int:
+    """Dlaždice, která se vejde do zvolené grafiky. 8 GB je výchozí."""
+    return GPU_TILES.get(str(preset), GPU_TILES["8"])
+
+
 def tile_vram_bytes(tile: int) -> float:
     tile = max(128, min(512, int(tile)))
     return (0.75 + (tile / 256) ** 2 * 3.3) * 1024**3
