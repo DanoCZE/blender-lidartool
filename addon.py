@@ -1148,7 +1148,7 @@ SCENE_PROPS = (
         default=384,
         min=128,
         max=512,
-        description="Větší dlaždice je rychlejší, ale potřebuje víc VRAM. 384 je pro 8 GB grafiku",
+        description="Větší dlaždice je rychlejší, ale potřebuje víc VRAM. 384 je pro 8 GB grafiku. Z dlaždice se použije jen ostřejší střed, měkký okraj se zahodí",
     )),
     ("lidar_drive_step", bpy.props.FloatProperty(name="Krok osy", default=5.0, min=1.0, unit="LENGTH")),
     ("lidar_osrm", bpy.props.StringProperty(name="OSRM URL", default="https://router.project-osrm.org")),

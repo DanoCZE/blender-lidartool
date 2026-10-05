@@ -183,6 +183,7 @@ def _upscale_x4_tiled(
 ):
     """Dlaždice dostane přesah jako kontext a ten se po modelu ořízne.
 
+    Okraj je měkčí, protože síť tam sahá mimo dlaždici. Ve výsledku zůstane jen střed.
     Průměrování překryvu míchalo nejisté okraje a v pruzích obraz rozmývalo.
     """
     height, width = image.shape[:2]
@@ -237,13 +238,26 @@ def _upscale_x4_tiled(
     return output, scratch
 
 
+def _edge_pad(tile: int) -> int:
+    """Kolik pixelů z každé strany zahodit, aby ve výsledku nezůstal měkký okraj.
+
+    U dlaždice 360 px je to 120 px. Menší přesah nechával pruhy, ve kterých
+    je ostrost zhruba o pětinu nižší než uprostřed.
+    """
+    tile = int(tile)
+    if tile <= 1:
+        return 0
+    return max(16, min(tile // 3, (tile - 32) // 2))
+
+
 def _useful_tile(height: int, width: int, tile: int, overlap: int) -> tuple[int, int]:
     """Přesah je kontext uvnitř dlaždice, ne pixely navíc pro grafiku."""
     tile = max(1, int(tile))
     limit = min(height, width) - 1
     if limit <= 0 or tile <= 1:
         return 0, tile
-    pad = max(0, min(int(overlap), tile // 4, limit, (tile - 1) // 2))
+    wanted = max(int(overlap), _edge_pad(tile))
+    pad = max(0, min(wanted, (tile - 1) // 2, limit))
     return pad, max(1, tile - 2 * pad)
 
 
